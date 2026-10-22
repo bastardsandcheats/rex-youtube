@@ -463,6 +463,7 @@ def sync_source(url, alias):
             if info.get("live_status") in ("is_upcoming", "post_live"):
                 continue
             plan = playback.choose(info, CFG["max_height"])
+            playback.inspect_layout(plan)
             save_item(item, plan, url)
             creators.add(item["creator_id"])
         except providers.Unavailable:

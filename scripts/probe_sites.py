@@ -104,7 +104,7 @@ def resolve_example(pair):
     if url.endswith("/videos"):
         url, ctx, entry = next(providers.enumerate_source(url, limit=1))
     info = providers.extract(url)
-    return name, url, info, playback.choose(info)
+    return name, url, info, playback.inspect_layout(playback.choose(info))
 
 
 def inspect_stream(url):
@@ -116,7 +116,7 @@ def inspect_stream(url):
             "-read_intervals",
             "%+#30",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height",
+            "stream=index,codec_type,codec_name,width,height",
             "-of",
             "json",
             url,
@@ -270,6 +270,11 @@ def main():
                             s.local_url() + "/stream/" + row["relay_path"]
                         ),
                     )
+                    actual = {x["index"]: x["codec_type"] for x in report["streams"]}
+                    for stream in playback.media_info(plan)["streams"]:
+                        assert (
+                            actual.get(stream["index"]) == stream["codec_type"]
+                        ), "Feed track index disagrees with relay"
                     if rex:
                         report["rex"] = rex_playback(row, item["is_live"])
                     report["result"] = "passed"

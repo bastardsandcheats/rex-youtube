@@ -289,3 +289,24 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(rows[0]["feed_id"], "yt-hls2-abc")
             self.assertEqual(rows[0]["rating_key"], "789")
             self.assertEqual(json.loads(rows[0]["metadata"])["episode"], 3)
+
+    def test_muxed_hls_uses_actual_header_indices(self):
+        from types import SimpleNamespace
+
+        video = info("Dailymotion")
+        video["formats"][0]["protocol"] = "m3u8_native"
+        plan = playback.choose(video)
+        actual = [
+            {"index": 0, "codec_type": "audio", "codec_name": "aac"},
+            {"index": 1, "codec_type": "video", "codec_name": "h264"},
+        ]
+        result = SimpleNamespace(returncode=0, stdout=json.dumps({"streams": actual}))
+        with patch.object(playback.subprocess, "run", return_value=result) as probe:
+            playback.inspect_layout(plan)
+        self.assertIn("%+#1", probe.call_args.args[0])
+        self.assertEqual(playback.media_info(plan)["streams"], actual)
+
+    def test_progressive_layout_does_not_require_a_probe(self):
+        with patch.object(playback.subprocess, "run") as probe:
+            playback.inspect_layout(playback.choose(info()))
+        probe.assert_not_called()

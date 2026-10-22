@@ -1,6 +1,8 @@
 """Small playback plans and HTTP/HLS/DASH manifest rewriting; no media files."""
 
 import re
+import json
+import subprocess
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlsplit
 
@@ -74,6 +76,51 @@ def choose(info, max_height=1080):
     }
 
 
+def inspect_layout(plan):
+    """Muxed HLS does not declare track indices. Read headers, never a full video.
+
+    Separate-track manifests have a controlled order and need no probe. Guessing
+    muxed indices can produce a playable FFmpeg stream but invalid browser DASH.
+    """
+    if plan["kind"] != "hls" or plan.get("audio"):
+        return plan
+    request_headers = headers(plan, plan["video"])
+    raw_headers = "".join(f"{k}: {v}\r\n" for k, v in request_headers.items())
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-rw_timeout",
+            "15000000",
+            "-headers",
+            raw_headers,
+            "-read_intervals",
+            "%+#1",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,avg_frame_rate,bit_rate,sample_rate,channels,channel_layout",
+            "-of",
+            "json",
+            plan["video"]["url"],
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode:
+        # stderr can contain expiring credentials: leave it out of public logs.
+        raise ValueError("Cannot determine the muxed HLS track layout")
+    streams = [
+        s
+        for s in json.loads(result.stdout).get("streams", [])
+        if s.get("codec_type") in ("video", "audio")
+    ]
+    if not any(s.get("codec_type") == "video" for s in streams):
+        raise ValueError("Muxed HLS has no readable video track")
+    plan["probe_streams"] = streams
+    return plan
+
+
 def codec(value, audio=False):
     value = str(value or "")
     for prefix, name in [
@@ -133,7 +180,7 @@ def media_info(plan):
     fmt = {"format_name": container}
     if plan["duration"]:
         fmt["duration"] = str(plan["duration"])
-    return {"format": fmt, "streams": streams}
+    return {"format": fmt, "streams": plan.get("probe_streams") or streams}
 
 
 def extension(plan):

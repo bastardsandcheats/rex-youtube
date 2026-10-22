@@ -25,7 +25,7 @@ New collections backfill five entries per 15-minute poll by default, up to the c
 
 ## Setup
 
-Install Python 3.13, Node.js (YouTube extraction) and FFmpeg (live copy-muxing), then:
+Install Python 3.13, Node.js (YouTube extraction) and FFmpeg/ffprobe (HLS layout checks and live copy-muxing), then:
 
 ```sh
 python3 -m venv venv
@@ -50,7 +50,7 @@ Keep `data/metadata.db` when upgrading: it holds identities, canonical URLs, met
 
 Tested against upstream Rex **`71570e16f2a74631ee90891f47942b067cf5a93f`**. The previous HLS patch is no longer required or included. Use a current Rex build with native DASH playback support.
 
-The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information; it does not ffprobe every upload. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
+The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information. Separate-track manifests have a controlled track order and need no probe. Muxed HLS does not declare its track indices, so those items get a small ffprobe header check before publishing; guessing the order breaks browser playback. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
 
 Rex's feed currently accepts video file labels, rather than `.m3u8`/`.mpd` file labels. The feed therefore uses a logical `.mp4` **file** label while **path** points to the actual manifest. This does not create an MP4 or invent a file size. Plex Web uses Rex's DASH transcoder for these manifest sources; clients that insist on direct-playing the logical MP4 may fail.
 
