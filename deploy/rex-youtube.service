@@ -1,0 +1,15 @@
+[Unit]
+Description=YouTube streaming source for Rex
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/opt/rex-youtube
+ExecStart=/opt/rex-youtube/venv/bin/python /opt/rex-youtube/service.py
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+Environment=PYTHONUNBUFFERED=1
+[Install]
+WantedBy=multi-user.target
