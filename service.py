@@ -80,7 +80,7 @@ def local_url():
 
 
 def rex_headers(extra=None):
-    """Attach credentials only to Rex requests, never to YouTube or image downloads."""
+    """Attach credentials only to Rex requests, never to external media or image downloads."""
     headers = {"Accept": "application/json"}
     token = os.environ.get("REX_TOKEN") or CFG.get("rex_token")
     if token:
@@ -206,7 +206,7 @@ def init_db():
 def library_name(item):
     title = providers.SOURCES.get(item["provider"], item["provider"].title())
     if item["is_live"]:
-        return title + " Live"
+        return "Live Streams"
     if item["kind"] == "episode":
         return CFG.get("library", title) if item["provider"] == "youtube" else title
     return title + " Videos"
@@ -386,11 +386,13 @@ def publish(row):
                     "summary": item.get("creator_description", ""),
                 },
             )
-        if item.get("creator_art"):
+        # Prefer creator artwork; use an episode thumbnail when an extractor has no avatar.
+        creator_art = item.get("creator_art") or item.get("thumbnail")
+        if creator_art:
             for owner in (parent, meta.get("parentRatingKey")):
                 if owner:
                     try:
-                        upload_art(owner, item["creator_art"])
+                        upload_art(owner, creator_art)
                     except Exception as error:
                         LOG.warning(
                             "Channel artwork unavailable: %s", type(error).__name__
@@ -452,7 +454,7 @@ def sync_source(url, alias):
             ).fetchone()
         if old and old["status"] == "published":
             continue
-        if failure and time.time() - failure[0] < 86400:
+        if failure and time.time() - failure[0] < 86400 and not entry.get("is_live"):
             continue
         if count >= CFG["batch_size"]:
             break
@@ -460,7 +462,9 @@ def sync_source(url, alias):
         try:
             info = providers.extract(webpage)
             item = providers.normalize(info, context)
-            if info.get("live_status") in ("is_upcoming", "post_live"):
+            if info.get("live_status") in ("is_upcoming", "post_live") or (
+                info.get("extractor_key") == "TwitchVod" and info.get("is_live")
+            ):
                 continue
             plan = playback.choose(info, CFG["max_height"])
             playback.inspect_layout(plan)

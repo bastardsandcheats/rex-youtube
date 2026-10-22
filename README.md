@@ -7,19 +7,24 @@ sources.txt → yt-dlp / Streamlink → normalized metadata → Rex feed/library
 playback request → fresh URL resolution → HTTP / HLS / DASH relay → Rex → Plex
 ```
 
+[Watch the browser demo](demo/rex-youtube-demo.mp4): six libraries and actual Plex Web playback. [Demo details](demo/README.md).
+
 ## Sources and libraries
 
 Put one public URL per line in `config/sources.txt`. Blank lines and comments are ignored. An optional `| Show name` overrides a collection's name. Existing installations using `config/channels.txt` continue to work when `sources.txt` is absent.
 
 ```text
-https://www.youtube.com/@TechnologyConnections
-https://vimeo.com/1084537
-https://www.dailymotion.com/video/x7bs2wf
+https://www.youtube.com/@TechnologyConnections/videos
+https://vimeo.com/businessofsoftware
+https://www.dailymotion.com/ComputerHoy
+https://framatube.org/c/joinpeertube/videos
+https://www.tiktok.com/@astrosamantha
+https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time
 ```
 
-The extractor determines the site. Collections become shows in a library named after the provider (for example **YouTube** or **PeerTube**). The creator is the show, publication year is the season, and episodes run oldest to newest within each year. Missing publication dates use season 0. Single-video URLs become movies in **YouTube Videos**, **Vimeo Videos**, etc. Titles, descriptions and artwork come from the source, rather than a movie database. The optional `library` setting retains the legacy YouTube show-library override.
+The extractor determines the site. Collections become shows in a library named after the provider (for example **YouTube** or **PeerTube**). The creator is the show, publication year is the season, and episodes run oldest to newest within each year. Missing publication dates use season 0. Single-video URLs become movies in **YouTube Videos**, **Vimeo Videos**, etc. Titles, descriptions and artwork come from the source, rather than a movie database. Creator artwork is preferred for show/season posters; when no avatar is exposed, an episode thumbnail is used. Vimeo’s public oEmbed fills upload dates missing from its anonymous player. The optional `library` setting retains the legacy YouTube show-library override.
 
-A Twitch channel root discovers its VOD collection and, when online, a separate temporary movie in **Twitch Live**. `/videos` selects just the VOD collection. Confirmed offline results remove only that live item; network errors preserve it. VODs remain persistent. There is no EPG, DVR or live-TV library.
+A Twitch channel root discovers its VOD collection and, when online, a separate temporary movie in **Live Streams**. `/videos` selects just the VOD collection. Confirmed offline results remove only that live item; network errors preserve it. VODs remain persistent in the **Twitch** show library, grouped by channel. TikTok `/@creator/live` URLs and other yt-dlp live sources use the same **Live Streams** movie library. Streamlink is also tried for live URLs with a matching plugin when yt-dlp has no dedicated extractor; it is not a separate library. There is no EPG, DVR or live-TV library.
 
 New collections backfill five entries per 15-minute poll by default, up to the configured `collection_limit` (default 1000). Unavailable videos are skipped and retried after 24 hours. One failed source does not stop other sources.
 
@@ -66,7 +71,7 @@ Rex's feed currently accepts video file labels, rather than `.m3u8`/`.mpd` file 
 
 Signed playback URLs, anonymous cookies and extractor headers live only in RAM and are refreshed close to playback (120-second resolution cache). No complete media file or persistent media cache is created. Rex still uses its normal temporary transcoder output. Artwork is converted to JPEG in memory and stored by Rex.
 
-For live playback only, a small FFmpeg process copies the selected HLS streams into MPEG-TS so Rex's Part endpoint serves actual video bytes. It does **not** encode or save the broadcast. Continuous playback through that endpoint was verified for 12 seconds; indefinite playback, Plex Web's unknown-duration behavior and recovery from broadcaster discontinuities are not guaranteed. A client disconnect stops the muxer; reopening resolves a fresh stream. An ended broadcast disappears on the next successful offline poll.
+For live playback only, a small FFmpeg process copies the selected HLS streams into MPEG-TS so Rex's Part endpoint serves actual video bytes. It does **not** encode or save the broadcast. Continuous Twitch and TikTok live playback through that endpoint was verified for 12 seconds each; indefinite playback, Plex Web's unknown-duration behavior and recovery from broadcaster discontinuities are not guaranteed. A client disconnect stops the muxer; reopening resolves a fresh stream. An ended broadcast disappears on the next successful offline poll.
 
 ## Verification
 
@@ -81,8 +86,11 @@ Real media-path checks use public technology/science content and official Blende
 | TikTok | yt-dlp, anonymous browser impersonation | Progressive relay and Rex DASH decode |
 | Twitch VOD | yt-dlp | HLS relay and Rex DASH decode |
 | Twitch live | Streamlink | Continuous relay and Rex Part decode |
+| TikTok live | yt-dlp | Continuous relay and Rex Part decode |
 | Bilibili | yt-dlp, anonymous browser impersonation | Experimental: public pages/API blocked by anti-bot responses here; playback unverified |
 | Public DASH sample | yt-dlp generic extractor | Separate-track DASH relay and Rex DASH decode |
+
+Channel collections from all six accessible providers were also fed as **episodes** and decoded through Rex. The walkthrough uses these creator/show libraries rather than just single-video movie libraries.
 
 Run the offline suite and optional network probes:
 
@@ -93,8 +101,10 @@ venv/bin/ruff check service.py providers.py playback.py scripts tests
 venv/bin/python -m unittest discover -s tests
 venv/bin/pip-audit -r requirements.txt
 venv/bin/python scripts/probe_sites.py --site youtube --site dash-demo --rex-bin /path/to/rex-server
-# An optional currently live public programming stream:
-venv/bin/python scripts/probe_sites.py --live-url https://www.twitch.tv/CHANNEL --rex-bin /path/to/rex-server
+venv/bin/python scripts/probe_sites.py --collections --rex-bin /path/to/rex-server
+# Optional currently live public programming/weather streams:
+venv/bin/python scripts/probe_sites.py --site live-only --live-url https://www.twitch.tv/CHANNEL --rex-bin /path/to/rex-server
+venv/bin/python scripts/probe_sites.py --site live-only --live-url https://www.tiktok.com/@weathernewslive/live --rex-bin /path/to/rex-server
 ```
 
 The upstream `tests/test_native_transcode.py` suite was also run against this Rex build and FFmpeg 7.1.5: **247/250 checks passed**. The failures were a far-seek timestamp expectation, a Vorbis tone check and an HDR conversion color-tag check. These are upstream playback limits to investigate, not a claim that every format works. To repeat it, follow Rex's native test instructions and set `REX_SERVER` and `REX_TRANSCODER` to your binaries. A clean upstream Rust playback unit-test build is also available:

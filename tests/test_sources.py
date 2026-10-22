@@ -310,3 +310,67 @@ class SourceTests(unittest.TestCase):
         with patch.object(playback.subprocess, "run") as probe:
             playback.inspect_layout(playback.choose(info()))
         probe.assert_not_called()
+
+    def test_all_live_backends_share_one_movie_library(self):
+        for extractor in ("TwitchStream", "TikTokLive", "Example:Streamlink"):
+            video = info(extractor)
+            video["is_live"] = True
+            item = providers.normalize(video, {"collection": True})
+            self.assertEqual(item["kind"], "movie")
+            self.assertEqual(s.library_name(item), "Live Streams")
+
+    def test_collection_uses_creator_instead_of_generated_playlist_title(self):
+        video = info("TwitchVod")
+        video["channel"] = "Maker Lab"
+        item = providers.normalize(
+            video, {"collection": True, "name": "Maker Lab - All Videos sorted by Date"}
+        )
+        self.assertEqual(item["creator_name"], "Maker Lab")
+        item = providers.normalize(video, {"collection": True, "alias": "My Workshops"})
+        self.assertEqual(item["creator_name"], "My Workshops")
+
+    def test_streamlink_can_resolve_a_non_twitch_live_site(self):
+        from unittest.mock import MagicMock
+        import streamlink
+
+        live = info("Example:Streamlink")
+        live["is_live"] = True
+        with (
+            patch.object(providers, "detect", return_value="generic"),
+            patch.object(streamlink, "Streamlink", return_value=MagicMock()),
+            patch.object(providers, "streamlink_live", return_value=live) as resolve,
+        ):
+            extracted = providers.extract("https://live.example/broadcast")
+        resolve.assert_called_once_with("https://live.example/broadcast")
+        self.assertEqual(s.library_name(providers.normalize(extracted)), "Live Streams")
+
+    def test_vimeo_public_oembed_restores_upload_year(self):
+        from unittest.mock import MagicMock
+
+        video = info("Vimeo", "54502942")
+        video.pop("upload_date")
+        client = MagicMock()
+        client.extract_info.return_value = video
+        response = MagicMock()
+        response.json.return_value = {
+            "upload_date": "2012-11-28 23:09:00",
+            "author_url": "https://vimeo.com/businessofsoftware",
+        }
+        with (
+            patch.object(providers, "detect", return_value="vimeo"),
+            patch.object(providers.yt_dlp, "YoutubeDL") as factory,
+            patch.object(providers.requests, "get", return_value=response),
+        ):
+            factory.return_value.__enter__.return_value = client
+            extracted = providers.extract("https://vimeo.com/54502942")
+        self.assertEqual(extracted["upload_date"], "20121128")
+        self.assertEqual(extracted["uploader_id"], "businessofsoftware")
+
+    def test_twitch_channel_defaults_to_archived_vods(self):
+        collection = {"id": "maker", "extractor_key": "TwitchVideos", "entries": []}
+        with patch.object(providers, "extract", return_value=collection) as extract:
+            list(providers.enumerate_source("https://www.twitch.tv/csharpfritz/videos"))
+        self.assertEqual(
+            extract.call_args.args[0],
+            "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
+        )

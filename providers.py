@@ -1,6 +1,7 @@
 """Anonymous extraction and a small shared vocabulary for public web videos."""
 
 import functools
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request
 
 import yt_dlp
+import requests
 from yt_dlp.networking.impersonate import ImpersonateTarget
 from yt_dlp.extractor import gen_extractor_classes
 
@@ -72,8 +74,8 @@ def source_lines(path):
             yield url.strip(), alias.strip()
 
 
-def twitch_live(url):
-    """Streamlink supplies current public-live metadata and HLS; its disk cache is disabled."""
+def streamlink_live(url):
+    """Resolve public live plugins with anonymous, memory-only Streamlink state."""
     import streamlink
     from streamlink.cache import Cache
 
@@ -82,6 +84,7 @@ def twitch_live(url):
     _, plugin_class, resolved = session.resolve_url(url)
     plugin = plugin_class(session, resolved)
     plugin.cache = Cache("rex-youtube-disabled", disabled=True)
+    source = provider(plugin_class.__module__.rsplit(".", 1)[-1])
     title, author, category, broadcast = (
         plugin.get_title(),
         plugin.get_author(),
@@ -90,15 +93,16 @@ def twitch_live(url):
     )
     streams = plugin.streams()
     if not streams:
-        if not broadcast:
+        if source == "twitch" and not broadcast:
             raise Unavailable("Source is currently offline")
         raise RuntimeError("Public live formats are temporarily unavailable")
+    author = author or urlsplit(url).path.strip("/") or urlsplit(url).hostname
     formats = []
     for name, stream in streams.items():
         quality = re.match(r"(\d+)p", name)
-        if not quality or not hasattr(stream, "url"):
+        if (not quality and name != "best") or not hasattr(stream, "url"):
             continue
-        height = int(quality[1])
+        height = int(quality[1]) if quality else None
         formats.append(
             {
                 "format_id": name,
@@ -107,13 +111,17 @@ def twitch_live(url):
                 "vcodec": "avc1.640028",
                 "acodec": "mp4a.40.2",
                 "height": height,
-                "width": round(height * 16 / 9),
-                "http_headers": dict(session.http.headers),
+                "width": round(height * 16 / 9) if height else None,
+                "http_headers": dict(
+                    session.http.prepare_request(
+                        requests.Request("GET", stream.url)
+                    ).headers
+                ),
             }
         )
     return {
-        "id": str(broadcast or author),
-        "extractor_key": "TwitchStream",
+        "id": str(broadcast or hashlib.sha256(url.encode()).hexdigest()[:24]),
+        "extractor_key": source + ":Streamlink",
         "webpage_url": url,
         "is_live": True,
         "title": title or author,
@@ -127,7 +135,22 @@ def twitch_live(url):
 def extract(url, *, flat=False, limit=None):
     """Use fresh anonymous extractor state; no cookie file, account or disk cache."""
     if not flat and re.fullmatch(r"https?://(?:www\.)?twitch.tv/[\w-]+/?", url):
-        return twitch_live(url)
+        return streamlink_live(url)
+    if detect(url) == "generic":
+        import streamlink
+
+        try:
+            streamlink.Streamlink().resolve_url(url)
+        except streamlink.NoPluginError:
+            pass
+        else:
+            return streamlink_live(url)
+    # yt-dlp returns its own canonical collection URLs; accept PeerTube's long form too.
+    url = (
+        re.sub(r"(/)video-channels/", r"\1c/", url)
+        if "/video-channels/" in url
+        else url
+    )
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -153,6 +176,34 @@ def extract(url, *, flat=False, limit=None):
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info:
+                # The anonymous Vimeo embed omits dates/creator URLs. Public oEmbed
+                # supplies those canonical fields without a login or a page scraper.
+                if (
+                    not flat
+                    and provider(info.get("extractor_key")) == "vimeo"
+                    and not info.get("upload_date")
+                ):
+                    try:
+                        response = requests.get(
+                            "https://vimeo.com/api/oembed.json",
+                            params={"url": "https://vimeo.com/" + str(info["id"])},
+                            timeout=15,
+                        )
+                        response.raise_for_status()
+                        public = response.json()
+                        info["upload_date"] = (public.get("upload_date") or "")[
+                            :10
+                        ].replace("-", "")
+                        info["uploader_url"] = public.get("author_url") or info.get(
+                            "uploader_url"
+                        )
+                        info["uploader_id"] = (info.get("uploader_url") or "").rstrip(
+                            "/"
+                        ).rsplit("/", 1)[-1] or info.get("uploader_id")
+                    except (requests.RequestException, ValueError):
+                        LOG.debug(
+                            "Vimeo public metadata unavailable; keeping the embed metadata"
+                        )
                 for fmt in info.get("formats", []):
                     request = Request(fmt["url"])
                     ydl.cookiejar.add_cookie_header(request)
@@ -165,7 +216,7 @@ def extract(url, *, flat=False, limit=None):
     except yt_dlp.utils.DownloadError as error:
         # A network/API failure must never be mistaken for a live -> offline transition.
         if re.search(
-            r"currently offline|is offline|not currently live|not broadcasting",
+            r"currently offline|is offline|not currently live|not broadcasting|livestream has ended|not live",
             str(error),
             re.I,
         ):
@@ -191,6 +242,10 @@ def enumerate_source(url, alias="", limit=1000):
         and not re.search(r"/(videos|streams|shorts)/?$", url)
     ):
         url = url.rstrip("/") + "/videos"
+    if detected == "twitch" and re.fullmatch(
+        r"https?://(?:www\.)?twitch.tv/[\w-]+/videos/?", url
+    ):
+        url = url.rstrip("/") + "?filter=archives&sort=time"
     info = extract(url, flat=True, limit=limit)
     if not info:
         return
@@ -202,6 +257,7 @@ def enumerate_source(url, alias="", limit=1000):
         entries.reverse()
     context = {
         "collection": collection,
+        "alias": alias,
         "name": alias
         or info.get("channel")
         or info.get("uploader")
@@ -267,9 +323,10 @@ def normalize(info, context=None):
         "title": info.get("title") or ident,
         "description": info.get("description") or "",
         "creator_id": creator,
-        "creator_name": context.get("name")
+        "creator_name": context.get("alias")
         or info.get("channel")
         or info.get("uploader")
+        or context.get("name")
         or source,
         "creator_description": context.get("description") or "",
         "creator_art": context.get("art"),

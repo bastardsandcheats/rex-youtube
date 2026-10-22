@@ -1,9 +1,13 @@
-# One public URL per line. Collections become shows; single videos become movies.
-https://www.youtube.com/@TechnologyConnections
+# Creator collections become shows, with publication years as seasons.
+https://www.youtube.com/@TechnologyConnections/videos
+https://vimeo.com/businessofsoftware
+https://www.dailymotion.com/ComputerHoy
+https://framatube.org/c/joinpeertube/videos
+https://www.tiktok.com/@astrosamantha
+https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time
+
 # Optional collection-name override: URL | Show name
-# Other anonymously accessible examples:
-# https://www.dailymotion.com/video/x7bs2wf
-# https://framatube.org/videos/watch/9c9de5e8-0a1e-484a-b099-e80766180a6d
-# https://www.tiktok.com/@astrosamantha/video/7166258449645407493
-# A Twitch channel root discovers VODs and a transient live movie when online.
-# https://www.twitch.tv/csharpfritz
+# A single-video URL instead becomes a movie in the provider's Videos library.
+# A Twitch channel root discovers VODs and, when online, a live movie.
+# Live sources from every provider share the Live Streams movie library:
+# https://www.tiktok.com/@weathernewslive/live

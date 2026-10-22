@@ -37,6 +37,16 @@ EXAMPLES = {
 }
 
 
+COLLECTIONS = {
+    "youtube": "https://www.youtube.com/@TechnologyConnections/videos",
+    "vimeo": "https://vimeo.com/businessofsoftware",
+    "dailymotion": "https://www.dailymotion.com/ComputerHoy",
+    "peertube": "https://framatube.org/c/joinpeertube/videos",
+    "tiktok": "https://www.tiktok.com/@astrosamantha",
+    "twitch": "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
+}
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -99,12 +109,13 @@ def rex_fixture(binary, directory):
     raise RuntimeError("Disposable Rex startup timed out")
 
 
-def resolve_example(pair):
+def resolve_example(pair, collection=False):
     name, url = pair
-    if url.endswith("/videos"):
-        url, ctx, entry = next(providers.enumerate_source(url, limit=1))
+    ctx = {}
+    if collection:
+        url, ctx, entry = next(providers.enumerate_source(url, limit=2))
     info = providers.extract(url)
-    return name, url, info, playback.inspect_layout(playback.choose(info))
+    return name, url, info, playback.inspect_layout(playback.choose(info)), ctx
 
 
 def inspect_stream(url):
@@ -140,8 +151,18 @@ def rex_playback(row, live=False):
         key = con.execute(
             "SELECT rating_key FROM items WHERE key=?", (row["key"],)
         ).fetchone()[0]
+    meta = s.rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
+    item = json.loads(row["metadata"])
+    assert meta.get("type") == item["kind"], "Rex stored the wrong media kind"
+    if item["kind"] == "episode":
+        assert (
+            meta.get("grandparentTitle") == item["creator_name"]
+        ), "Wrong creator show"
+        assert int(meta.get("parentIndex")) == int(
+            item["published"][:4] or 0
+        ), "Wrong year season"
+        assert int(meta.get("index")) == item["episode"], "Wrong episode number"
     if live:
-        meta = s.rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
         part = meta["Media"][0]["Part"][0]["key"]
         # Test continuous playback through the actual Part endpoint, not just source discovery.
         url = s.CFG["rex_url"] + part
@@ -223,8 +244,14 @@ def main():
         "--live-url",
         help="A currently live, safe-for-work programming/educational stream",
     )
+    parser.add_argument(
+        "--collections",
+        action="store_true",
+        help="Test creator collections as shows rather than standalone movies",
+    )
     args = parser.parse_args()
-    selected = {k: v for k, v in EXAMPLES.items() if not args.site or k in args.site}
+    examples = COLLECTIONS if args.collections else EXAMPLES
+    selected = {k: v for k, v in examples.items() if not args.site or k in args.site}
     if args.live_url:
         selected["live-experiment"] = args.live_url
     failures = 0
@@ -254,8 +281,10 @@ def main():
             for name, url in selected.items():
                 report = {"provider": name, "url": url}
                 try:
-                    _, canonical, info, plan = resolve_example((name, url))
-                    item = providers.normalize(info)
+                    _, canonical, info, plan, context = resolve_example(
+                        (name, url), args.collections and name != "live-experiment"
+                    )
+                    item = providers.normalize(info, context)
                     s.save_item(item, plan, canonical)
                     with s.db() as con:
                         row = dict(
@@ -265,6 +294,8 @@ def main():
                         )
                     report.update(
                         title=item["title"],
+                        kind=item["kind"],
+                        creator=item["creator_name"],
                         transport=plan["kind"],
                         streams=inspect_stream(
                             s.local_url() + "/stream/" + row["relay_path"]
