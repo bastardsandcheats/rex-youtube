@@ -96,5 +96,3 @@ venv/bin/pip-audit -r requirements.txt
 Tests run with the example configuration when no active configuration is present. `REX_TOKEN` is sent only to Rex, including artwork uploads. The relay exposes playback for indexed videos to hosts that can reach its listener; bind it to the intended network interface.
 
 Before publishing, stage only source code, documentation, example configuration, tests and the HLS patch. Keep active configuration, tokens, databases, logs, diagnostics and virtual environments local.
-
-Licensed under [MIT](LICENSE); see [third-party notices](NOTICE.md) for the Rex patch.
