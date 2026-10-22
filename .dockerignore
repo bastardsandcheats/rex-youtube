@@ -2,6 +2,3 @@
 !tests/
 !tests/rex/
 !tests/rex/Dockerfile
-!tests/rex/add-hls-tests.py
-!patches/
-!patches/rex-hls-vod.patch

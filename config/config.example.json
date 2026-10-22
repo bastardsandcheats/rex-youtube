@@ -9,5 +9,6 @@
   "batch_size": 5,
   "max_height": 1080,
   "log_level": "INFO",
-  "rex_token": ""
+  "rex_token": "",
+  "collection_limit": 1000
 }

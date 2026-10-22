@@ -1,5 +1,5 @@
 [Unit]
-Description=YouTube streaming source for Rex
+Description=Public web-video example source for Rex
 After=network-online.target
 Wants=network-online.target
 [Service]

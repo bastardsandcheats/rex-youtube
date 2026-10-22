@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""YouTube -> Rex metadata and HLS relay. Never downloads media to disk."""
+"""A small anonymous web-video feed and HTTP relay for Rex."""
 
 import collections
 import functools
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import subprocess
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from logging.handlers import RotatingFileHandler
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
+
 import requests
-import yt_dlp
 from PIL import Image, ImageOps
 
-Image.MAX_IMAGE_PIXELS = 16_000_000
+import playback
+import providers
 
+Image.MAX_IMAGE_PIXELS = 16_000_000
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "config.json"
 CFG = json.loads(
@@ -33,23 +37,11 @@ CFG = json.loads(
 )
 LOG = logging.getLogger("rex-youtube")
 STOP = threading.Event()
-# LOCK protects URL/format maps; RESOLVE_LOCK prevents concurrent extraction
-# of the same expiring signed URLs. Neither map is persisted in SQLite.
 LOCK = threading.RLock()
 RESOLVE_LOCK = threading.Lock()
 URLS = collections.OrderedDict()
 FORMATS = {}
-
-
-class YTLog:
-    def debug(self, msg):
-        pass
-
-    def warning(self, msg):
-        LOG.debug("yt-dlp: %s", msg)
-
-    def error(self, msg):
-        LOG.warning("yt-dlp: %s", msg)
+LIBRARIES = {}
 
 
 @contextmanager
@@ -65,19 +57,6 @@ def db():
         con.close()
 
 
-def init_db():
-    """Create metadata tables and apply the small, backwards-compatible schema migration."""
-    with db() as con:
-        con.executescript("""PRAGMA journal_mode=WAL;
- CREATE TABLE IF NOT EXISTS channels(id TEXT PRIMARY KEY,name TEXT,description TEXT);
- CREATE TABLE IF NOT EXISTS videos(id TEXT PRIMARY KEY,channel_id TEXT,title TEXT,description TEXT,published TEXT,duration REAL,episode INTEGER,info TEXT,rating_key TEXT,status TEXT,error TEXT,checked REAL);
- CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT);
- """)
-    with db() as con:
-        if "art" not in {r["name"] for r in con.execute("PRAGMA table_info(channels)")}:
-            con.execute("ALTER TABLE channels ADD COLUMN art TEXT")
-
-
 def state(key, value=None):
     with db() as con:
         if value is not None:
@@ -85,107 +64,6 @@ def state(key, value=None):
             return
         row = con.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
-
-
-def yt(url, flat=False):
-    """Extract metadata or a channel index without downloading media or enabling disk cache."""
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "cachedir": False,
-        "logger": YTLog(),
-        "socket_timeout": 20,
-        "retries": 2,
-        "extractor_retries": 2,
-        "js_runtimes": {"node": {}},
-        "extract_flat": "in_playlist" if flat else False,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
-
-
-def choose(info):
-    """Select compatible HLS video and prefer the original-language audio rendition."""
-    fs = info.get("formats", [])
-    video = [
-        f
-        for f in fs
-        if f.get("protocol") in ("m3u8_native", "m3u8")
-        and str(f.get("vcodec", "")).startswith("avc")
-        and (f.get("height") or 99999) <= CFG["max_height"]
-    ]
-    audio = [
-        f
-        for f in fs
-        if f.get("protocol") in ("m3u8_native", "m3u8") and f.get("vcodec") == "none"
-    ]
-    if not video or not audio:
-        raise RuntimeError("No compatible H.264/AAC HLS streams are available")
-    v = max(video, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
-    a = max(
-        audio,
-        key=lambda f: (
-            "original" in str(f.get("format_note", "")),
-            str(f.get("language", "")).startswith("en"),
-            f.get("tbr") or 0,
-            f.get("format_id", ""),
-        ),
-    )
-    return v, a
-
-
-def prepare_hls(row):
-    """Refresh a stored video’s format metadata before publishing its current delivery version."""
-    info = yt("https://www.youtube.com/watch?v=" + row["id"])
-    v, a = choose(info)
-    # Keep this delivery version stable: Rex retains analysis for an existing file path.
-    saved = {
-        "delivery": "hls-v2",
-        "thumbnail": info.get("thumbnail"),
-        "media_info": media_info(info, v, a),
-    }
-    with LOCK:
-        FORMATS[row["id"]] = (time.time(), v, a, info.get("http_headers") or {})
-    with db() as con:
-        con.execute(
-            "UPDATE videos SET info=?,status='ready' WHERE id=?",
-            (json.dumps(saved), row["id"]),
-        )
-    row["info"] = json.dumps(saved)
-    return row
-
-
-def media_info(info, v, a):
-    """Describe the controlled HLS master; its audio rendition becomes FFmpeg stream zero."""
-    # FFmpeg enumerates this master playlist's separate audio rendition first.
-    return {
-        "format": {
-            "format_name": "hls",
-            "duration": str(info["duration"]),
-            "nb_streams": 2,
-        },
-        "streams": [
-            {
-                "index": 1,
-                "codec_type": "video",
-                "codec_name": "h264",
-                "width": v.get("width"),
-                "height": v.get("height"),
-                "avg_frame_rate": str(v.get("fps") or 30),
-                "r_frame_rate": str(v.get("fps") or 30),
-                "pix_fmt": "yuv420p",
-            },
-            {
-                "index": 0,
-                "codec_type": "audio",
-                "codec_name": "aac",
-                "channels": a.get("audio_channels") or 2,
-                "sample_rate": str(a.get("asr") or 44100),
-                "tags": {"language": a.get("language") or "eng"},
-            },
-        ],
-    }
 
 
 @functools.lru_cache(maxsize=1)
@@ -223,58 +101,6 @@ def rex(method, path, body=None, params=None):
     )
     r.raise_for_status()
     return r.json() if r.content and "json" in r.headers.get("Content-Type", "") else {}
-
-
-def setup_rex():
-    """Create or reuse the TV library, then register this HTTP relay as its feed source."""
-    sections = (
-        rex("GET", "/library/sections").get("MediaContainer", {}).get("Directory", [])
-    )
-    lib = next(
-        (
-            x
-            for x in sections
-            if x.get("title") == CFG["library"] and x.get("type") == "show"
-        ),
-        None,
-    )
-    if lib is None:
-        rex(
-            "POST",
-            "/library/sections",
-            params={
-                "name": CFG["library"],
-                "type": "show",
-                "agent": "tv.plex.agents.series",
-                "scanner": "Plex TV Series",
-                "language": "en-US",
-                "location": "/rex-youtube/youtube",
-            },
-        )
-        lib = next(
-            x
-            for x in rex("GET", "/library/sections")["MediaContainer"]["Directory"]
-            if x.get("title") == CFG["library"] and x.get("type") == "show"
-        )
-    state("library", lib["key"])
-    rex(
-        "PUT",
-        "/rex/sources/" + CFG["source"],
-        {"url": local_url() + "/stream", "mount": "/rex-youtube"},
-    )
-    LOG.info("Using Rex library %s (section %s)", CFG["library"], lib["key"])
-
-
-def channel_art(listing):
-    thumbs = listing.get("thumbnails") or []
-    squares = [
-        t
-        for t in thumbs
-        if t.get("width") and t.get("height") and abs(t["width"] - t["height"]) < 10
-    ]
-    if squares:
-        return max(squares, key=lambda t: t["width"])["url"]
-    return next((t["url"] for t in thumbs if "avatar" in str(t.get("id"))), None)
 
 
 def jpeg_art(data):
@@ -315,346 +141,455 @@ def edit(key, kind, fields):
     rex("PUT", "/library/metadata/" + str(key), params=params)
 
 
-def reorder(channel_id):
-    """Number each upload year chronologically and queue changed placements for delivery."""
-    # Recompute from upload dates, never from YouTube's newest-first listing order.
+def init_db():
+    """Add the generic item table; migrate old videos without changing Rex identities."""
     with db() as con:
-        rows = con.execute(
-            "SELECT id,published,episode FROM videos WHERE channel_id=? AND info IS NOT NULL ORDER BY published,id",
-            (channel_id,),
-        ).fetchall()
-        # Use the channel listing to break ties between uploads on the same date.
-        order = {
-            ident: index
-            for index, ident in enumerate(
-                json.loads(state("order:" + channel_id) or "[]")
-            )
+        con.executescript("""PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT);
+        CREATE TABLE IF NOT EXISTS items(key TEXT PRIMARY KEY,metadata TEXT NOT NULL,
+            feed_id TEXT NOT NULL,relay_path TEXT NOT NULL,rating_key TEXT,
+            status TEXT NOT NULL DEFAULT 'ready');
+        CREATE TABLE IF NOT EXISTS failures(url TEXT PRIMARY KEY,checked REAL,error TEXT);
+        """)
+        tables = {
+            r[0]
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        rows = sorted(
-            rows,
-            key=lambda row: (
-                row["published"] or "",
-                order.get(row["id"], len(order)),
-                row["id"],
-            ),
+        if (
+            "videos" not in tables
+            or con.execute(
+                "SELECT 1 FROM state WHERE key='generic-migration'"
+            ).fetchone()
+        ):
+            return
+        channels = {r["id"]: dict(r) for r in con.execute("SELECT * FROM channels")}
+        for row in con.execute("SELECT * FROM videos WHERE info IS NOT NULL"):
+            channel = channels.get(row["channel_id"], {})
+            item = providers.normalize(
+                {
+                    "id": row["id"],
+                    "extractor_key": "Youtube",
+                    "webpage_url": "https://www.youtube.com/watch?v=" + row["id"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "channel_id": row["channel_id"],
+                    "upload_date": row["published"].replace("-", ""),
+                    "duration": row["duration"],
+                    "thumbnail": json.loads(row["info"]).get("thumbnail"),
+                },
+                {
+                    "collection": True,
+                    "name": channel.get("name"),
+                    "description": channel.get("description"),
+                    "art": channel.get("art"),
+                },
+            )
+            item.update(
+                episode=row["episode"],
+                media_info=json.loads(row["info"])["media_info"],
+                delivery="hls",
+            )
+            con.execute(
+                "INSERT OR IGNORE INTO items VALUES(?,?,?,?,?,?)",
+                (
+                    item["key"],
+                    json.dumps(item),
+                    "yt-hls2-" + row["id"],
+                    f'youtube/{row["channel_id"]}/{row["id"]}.v2.m3u8',
+                    row["rating_key"],
+                    "ready",
+                ),
+            )
+        con.execute("INSERT OR REPLACE INTO state VALUES('generic-migration','1')")
+
+
+def library_name(item):
+    title = providers.SOURCES.get(item["provider"], item["provider"].title())
+    if item["is_live"]:
+        return title + " Live"
+    if item["kind"] == "episode":
+        return CFG.get("library", title) if item["provider"] == "youtube" else title
+    return title + " Videos"
+
+
+def ensure_library(item):
+    """Create simple provider/kind libraries, independently of the configured URLs."""
+    name, kind = library_name(item), "show" if item["kind"] == "episode" else "movie"
+    key = (name, kind)
+    if key not in LIBRARIES:
+        sections = rex("GET", "/library/sections")["MediaContainer"].get(
+            "Directory", []
         )
-        counts = {}
-        for row in rows:
-            year = (row["published"] or "")[:4]
-            if not year.isdigit():
-                continue
-            counts[year] = counts.get(year, 0) + 1
-            if row["episode"] != counts[year]:
-                con.execute(
-                    "UPDATE videos SET episode=?,status='ready' WHERE id=?",
-                    (counts[year], row["id"]),
-                )
+        section = next(
+            (r for r in sections if r.get("title") == name and r.get("type") == kind),
+            None,
+        )
+        if not section:
+            directory = item["provider"] + (
+                "-live" if item["is_live"] else "-movies" if kind == "movie" else ""
+            )
+            rex(
+                "POST",
+                "/library/sections",
+                params={
+                    "name": name,
+                    "type": kind,
+                    "agent": (
+                        "tv.plex.agents.series"
+                        if kind == "show"
+                        else "tv.plex.agents.movie"
+                    ),
+                    "scanner": "Plex TV Series" if kind == "show" else "Plex Movie",
+                    "language": "en-US",
+                    "location": "/rex-youtube/" + directory,
+                },
+            )
+            sections = rex("GET", "/library/sections")["MediaContainer"].get(
+                "Directory", []
+            )
+            section = next(
+                r for r in sections if r.get("title") == name and r.get("type") == kind
+            )
+        LIBRARIES[key] = str(section["key"])
+    return LIBRARIES[key]
 
 
-def flush_ready():
-    """Retry metadata awaiting delivery without re-indexing videos already published."""
+def setup_rex():
+    LIBRARIES.clear()
+    rex(
+        "PUT",
+        "/rex/sources/" + CFG["source"],
+        {"url": local_url() + "/stream", "mount": "/rex-youtube"},
+    )
+
+
+def save_item(item, plan, source_entry):
+    """Persist canonical metadata, never the signed formats and anonymous cookies."""
+    item = {
+        **item,
+        "media_info": playback.media_info(plan),
+        "delivery": plan["kind"],
+        "source_entry": source_entry,
+    }
+    suffix = playback.extension(plan)
+    digest = hashlib.sha256(item["key"].encode()).hexdigest()[:24]
+    directory = item["provider"] + (
+        "-live" if item["is_live"] else "-movies" if item["kind"] == "movie" else ""
+    )
+    with db() as con:
+        previous = con.execute(
+            "SELECT * FROM items WHERE key=?", (item["key"],)
+        ).fetchone()
+        if previous:
+            old = json.loads(previous["metadata"])
+            item["episode"] = old.get("episode", 1)
+            con.execute(
+                "UPDATE items SET metadata=?,status='ready' WHERE key=?",
+                (json.dumps(item), item["key"]),
+            )
+        else:
+            item["episode"] = 1
+            con.execute(
+                "INSERT INTO items VALUES(?,?,?,?,?,?)",
+                (
+                    item["key"],
+                    json.dumps(item),
+                    item["key"],
+                    f"{directory}/{digest}.{suffix}",
+                    None,
+                    "ready",
+                ),
+            )
+    with LOCK:
+        FORMATS[item["key"]] = (time.time(), plan)
+
+
+def reorder(creator_id):
+    """Backfilled videos may renumber a year, but feed IDs and watch state stay stable."""
     with db() as con:
         rows = [
-            dict(r)
-            for r in con.execute(
-                "SELECT * FROM videos WHERE status='ready' ORDER BY published,id"
-            )
+            (r, json.loads(r["metadata"])) for r in con.execute("SELECT * FROM items")
         ]
-    for row in rows:
-        try:
-            if json.loads(row["info"]).get("delivery") != "hls-v2":
-                row = prepare_hls(row)
-            publish(row)
-        except Exception:
-            LOG.exception("Pending metadata delivery failed for %s", row["id"])
+        counts = collections.Counter()
+        for row, item in sorted(
+            rows,
+            key=lambda r: (r[1]["published"], r[1].get("timestamp", 0), r[1]["key"]),
+        ):
+            if item["kind"] != "episode" or item["creator_id"] != creator_id:
+                continue
+            group = (item["provider"], item["published"][:4])
+            counts[group] += 1
+            if item.get("episode") != counts[group]:
+                item["episode"] = counts[group]
+                con.execute(
+                    "UPDATE items SET metadata=?,status='ready' WHERE key=?",
+                    (json.dumps(item), row["key"]),
+                )
 
 
 def publish(row):
-    """Publish one placed episode, preserve upgrade playback state, and apply YouTube metadata."""
-    info = json.loads(row["info"])
-    channel = None
-    with db() as con:
-        channel = dict(
-            con.execute(
-                "SELECT * FROM channels WHERE id=?", (row["channel_id"],)
-            ).fetchone()
-        )
-    item = {
-        "id": "yt-hls2-" + row["id"],
-        "path": f'youtube/{row["channel_id"]}/{row["id"]}.v2.m3u8',
-        "library": state("library"),
-        "name": channel["name"],
-        "release": "youtube:" + row["channel_id"],
-        "kind": "episode",
-        "season": int(row["published"][:4]),
-        "episode": row["episode"],
-        "media_info": info["media_info"],
+    """Feed explicit placements, then apply the source's custom title and artwork."""
+    item = json.loads(row["metadata"])
+    # Upstream accepts video file labels, not manifest extensions. `path` remains
+    # the actual manifest URL; `file` is a logical Part label, never a disk file.
+    file = (
+        "/rex-youtube/"
+        + row["relay_path"].rsplit(".", 1)[0]
+        + (".ts" if item["is_live"] else ".mp4")
+    )
+    payload = {
+        "id": row["feed_id"],
+        "path": row["relay_path"],
+        "file": file,
+        "library": ensure_library(item),
+        "name": item["creator_name"] if item["kind"] == "episode" else item["title"],
+        "release": (
+            item["provider"] + ":" + item["creator_id"]
+            if item["kind"] == "episode"
+            else item["key"]
+        ),
+        "kind": item["kind"],
+        "media_info": item["media_info"],
     }
-    response = rex("POST", "/rex/feed/" + CFG["source"] + "/items", {"items": [item]})
+    if item["kind"] == "episode":
+        payload.update(season=int(item["published"][:4] or 0), episode=item["episode"])
+    response = rex(
+        "POST", "/rex/feed/" + CFG["source"] + "/items", {"items": [payload]}
+    )
     if response.get("rejected") or response.get("held"):
-        raise RuntimeError("Rex feed refusal: " + str(response))
-    receipts = rex("GET", "/rex/feed/" + CFG["source"] + "/items").get("items", [])
+        raise RuntimeError("Rex refused the media metadata: " + str(response))
+    receipts = rex("GET", "/rex/feed/" + CFG["source"] + "/items")["items"]
     receipt = next(
-        x for x in receipts if x["id"] == item["id"] and not x.get("deleted")
+        r for r in receipts if r["id"] == row["feed_id"] and not r.get("deleted")
     )
     key = str(receipt["ratingKey"])
-    # Earlier delivery layouts used different source IDs. Retire only this video's
-    # old versions, copying watched/resume state before removing their feed entries.
-    for old in [
-        x
-        for x in receipts
-        if x["id"]
-        in ("yt-" + row["id"], "yt-progressive-" + row["id"], "yt-hls-" + row["id"])
-        and not x.get("deleted")
-    ]:
-        previous = rex("GET", "/library/metadata/" + str(old["ratingKey"]))[
-            "MediaContainer"
-        ]["Metadata"][0]
-        if str(old["ratingKey"]) != key:
-            if previous.get("viewCount"):
-                rex(
-                    "GET",
-                    "/:/scrobble",
-                    params={"key": key, "identifier": "com.plexapp.plugins.library"},
-                )
-            if previous.get("viewOffset"):
-                rex(
-                    "GET",
-                    "/:/progress",
-                    params={
-                        "key": key,
-                        "time": previous["viewOffset"],
-                        "identifier": "com.plexapp.plugins.library",
-                        "state": "stopped",
-                    },
-                )
-        rex("DELETE", "/rex/feed/" + CFG["source"] + "/items", {"ids": [old["id"]]})
-        retired = json.loads(state("retired_keys") or "[]")
-        if str(old["ratingKey"]) != key and str(old["ratingKey"]) not in retired:
-            retired.append(str(old["ratingKey"]))
-            state("retired_keys", json.dumps(retired))
-    m = rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
-    # These are custom videos: keep YouTube metadata instead of matching Plex titles.
-    fields = {
-        "title": row["title"],
-        "summary": row["description"],
-        "index": row["episode"],
-    }
-    if row["published"]:
-        fields["originallyAvailableAt"] = row["published"]
-    edit(key, 4, fields)
-    parent = m.get("grandparentRatingKey")
-    if parent:
-        edit(parent, 2, {"title": channel["name"], "summary": channel["description"]})
-    if info.get("thumbnail"):
+    fields = {"title": item["title"], "summary": item["description"]}
+    if item["published"]:
+        fields["originallyAvailableAt"] = item["published"]
+    edit(key, 4 if item["kind"] == "episode" else 1, fields)
+    meta = rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
+    if item.get("thumbnail"):
         try:
-            upload_art(key, info["thumbnail"])
-        except (requests.RequestException, ValueError):
-            LOG.warning("Could not set thumbnail for %s", row["id"])
-    if channel.get("art"):
-        for owner in (parent, m.get("parentRatingKey")):
-            if owner:
-                try:
-                    upload_art(owner, channel["art"])
-                except (requests.RequestException, ValueError):
-                    LOG.warning("Could not set channel badge for %s", owner)
+            upload_art(key, item["thumbnail"])
+        except Exception as error:
+            LOG.warning(
+                "Thumbnail unavailable for %s: %s", row["key"], type(error).__name__
+            )
+    if item["kind"] == "episode":
+        parent = meta.get("grandparentRatingKey")
+        if parent:
+            edit(
+                parent,
+                2,
+                {
+                    "title": item["creator_name"],
+                    "summary": item.get("creator_description", ""),
+                },
+            )
+        if item.get("creator_art"):
+            for owner in (parent, meta.get("parentRatingKey")):
+                if owner:
+                    try:
+                        upload_art(owner, item["creator_art"])
+                    except Exception as error:
+                        LOG.warning(
+                            "Channel artwork unavailable: %s", type(error).__name__
+                        )
     with db() as con:
         con.execute(
-            "UPDATE videos SET status=?,rating_key=?,error=NULL WHERE id=?",
-            ("published", key, row["id"]),
+            "UPDATE items SET rating_key=?,status='published' WHERE key=?",
+            (key, row["key"]),
         )
-    LOG.info("Published %s: %s (Rex %s)", channel["name"], row["title"], key)
+    LOG.info("Published %s: %s", item["provider"], item["title"])
+
+
+def flush_ready():
+    with db() as con:
+        rows = [
+            dict(r) for r in con.execute("SELECT * FROM items WHERE status='ready'")
+        ]
+    for row in rows:
+        try:
+            publish(row)
+        except Exception as error:
+            LOG.warning("Delivery failed for %s: %s", row["key"], str(error)[:250])
+
+
+def remove_offline(source_entry):
+    """Only a positive offline result may remove a transient live movie."""
+    with db() as con:
+        rows = [
+            (r, json.loads(r["metadata"])) for r in con.execute("SELECT * FROM items")
+        ]
+    for row, item in rows:
+        if item["is_live"] and item.get("source_entry") == source_entry:
+            rex(
+                "DELETE",
+                "/rex/feed/" + CFG["source"] + "/items",
+                {"ids": [row["feed_id"]]},
+            )
+            with db() as con:
+                con.execute("DELETE FROM items WHERE key=?", (row["key"],))
+            LOG.info("Removed offline live item: %s", row["key"])
+
+
+def sync_source(url, alias):
+    count = 0
+    creators = set()
+    for webpage, context, entry in providers.enumerate_source(
+        url, alias, CFG.get("collection_limit", 1000)
+    ):
+        if STOP.is_set():
+            return
+        source = providers.provider(
+            entry.get("ie_key") or entry.get("extractor_key") or context["provider"]
+        )
+        key = f'{source}:video:{entry.get("id")}'
+        with db() as con:
+            old = con.execute("SELECT status FROM items WHERE key=?", (key,)).fetchone()
+            failure = con.execute(
+                "SELECT checked FROM failures WHERE url=?", (webpage,)
+            ).fetchone()
+        if old and old["status"] == "published":
+            continue
+        if failure and time.time() - failure[0] < 86400:
+            continue
+        if count >= CFG["batch_size"]:
+            break
+        count += 1
+        try:
+            info = providers.extract(webpage)
+            item = providers.normalize(info, context)
+            if info.get("live_status") in ("is_upcoming", "post_live"):
+                continue
+            plan = playback.choose(info, CFG["max_height"])
+            save_item(item, plan, url)
+            creators.add(item["creator_id"])
+        except providers.Unavailable:
+            remove_offline(url)
+        except Exception as error:
+            LOG.warning("Cannot index %s (%s): %s", source, webpage, str(error)[:200])
+            with db() as con:
+                con.execute(
+                    "INSERT OR REPLACE INTO failures VALUES(?,?,?)",
+                    (webpage, time.time(), type(error).__name__),
+                )
+    for creator in creators:
+        reorder(creator)
 
 
 def sync():
-    """Index a bounded batch, commit local metadata, then publish pending episodes to Rex."""
     setup_rex()
     flush_ready()
-    for line in (ROOT / "config" / "channels.txt").read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        url, _, alias = line.partition("|")
-        url = url.strip()
-        alias = alias.strip()
-        if "/@" in url and not re.search(r"/(videos|streams|shorts)/?$", url):
-            url = url.rstrip("/") + "/videos"
-        try:
-            listing = yt(url, True)
-            channel_id = listing.get("channel_id") or listing["id"]
-            name = (
-                alias
-                or listing.get("channel")
-                or listing["title"].removesuffix(" - Videos")
-            )
-            with db() as con:
-                con.execute(
-                    "INSERT OR REPLACE INTO channels(id,name,description,art) VALUES(?,?,?,?)",
-                    (
-                        channel_id,
-                        name,
-                        listing.get("description") or "",
-                        channel_art(listing),
-                    ),
-                )
-            entries = list(listing.get("entries") or [listing])
-            entries.reverse()
-            state("order:" + channel_id, json.dumps([e.get("id") for e in entries]))
-            count = 0
-            for entry in entries:
-                if STOP.is_set():
-                    return
-                ident = entry.get("id")
-                if not ident or not re.fullmatch(r"[\w-]{11}", ident):
-                    continue
-                with db() as con:
-                    old = con.execute(
-                        "SELECT * FROM videos WHERE id=?", (ident,)
-                    ).fetchone()
-                if old and old["status"] == "published":
-                    continue
-                # Unavailable/member-only uploads should not consume every polling cycle.
-                if (
-                    old
-                    and old["status"] == "error"
-                    and time.time() - (old["checked"] or 0) < 86400
-                ):
-                    continue
-                if count >= CFG["batch_size"]:
-                    break
-                count += 1
-                try:
-                    info = yt("https://www.youtube.com/watch?v=" + ident)
-                    if info.get("is_live") or not info.get("duration"):
-                        continue
-                    v, a = choose(info)
-                    saved = {
-                        "delivery": "hls-v2",
-                        "thumbnail": info.get("thumbnail"),
-                        "media_info": media_info(info, v, a),
-                    }
-                    with LOCK:
-                        FORMATS[ident] = (
-                            time.time(),
-                            v,
-                            a,
-                            info.get("http_headers") or {},
-                        )
-                    date = info.get("upload_date") or ""
-                    date = (
-                        f"{date[:4]}-{date[4:6]}-{date[6:8]}" if len(date) == 8 else ""
-                    )
-                    # Commit a retryable 'ready' row before making any feed request to Rex.
-                    with db() as con:
-                        episode = (
-                            old["episode"]
-                            if old and old["episode"]
-                            else con.execute(
-                                "SELECT COALESCE(MAX(episode),0)+1 FROM videos WHERE channel_id=?",
-                                (channel_id,),
-                            ).fetchone()[0]
-                        )
-                        con.execute(
-                            "INSERT OR REPLACE INTO videos VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (
-                                ident,
-                                channel_id,
-                                info["title"],
-                                info.get("description") or "",
-                                date,
-                                info["duration"],
-                                episode,
-                                json.dumps(saved),
-                                old["rating_key"] if old else None,
-                                "ready",
-                                None,
-                                time.time(),
-                            ),
-                        )
-                except Exception as error:
-                    LOG.warning("Could not add video %s: %s", ident, str(error)[:400])
-                    with db() as con:
-                        con.execute(
-                            "INSERT INTO videos(id,channel_id,status,error,checked) VALUES(?,?,'error',?,?) ON CONFLICT(id) DO UPDATE SET error=excluded.error,checked=excluded.checked,status=CASE WHEN videos.info IS NULL THEN 'error' ELSE videos.status END",
-                            (ident, channel_id, type(error).__name__, time.time()),
-                        )
-            reorder(channel_id)
-            flush_ready()
-            LOG.info(
-                "Channel check complete: %s; %s new entries processed", name, count
-            )
-        except Exception:
-            LOG.exception("Channel check failed")
+    source_path = ROOT / "config" / "sources.txt"
+    if not source_path.exists():
+        source_path = ROOT / "config" / "channels.txt"
+    for url, alias in providers.source_lines(source_path):
+        # Twitch's public channel page is live; its /videos collection is VODs.
+        urls = [url]
+        if providers.detect(url) == "twitch" and re.fullmatch(
+            r"https?://(?:www\.)?twitch.tv/[\w-]+/?", url
+        ):
+            urls = [url.rstrip("/") + "/videos", url]
+        for target in urls:
+            try:
+                sync_source(target, alias)
+            except providers.Unavailable:
+                remove_offline(target)
+            except Exception as error:
+                LOG.warning("Source check failed (%s): %s", target, str(error)[:200])
+    flush_ready()
 
 
-def resolve(ident):
-    """Refresh expiring signed stream URLs on demand; retain them only in memory."""
+def resolve(key):
+    """Refresh anonymous playback URLs close to use; signed URLs stay in RAM."""
     with RESOLVE_LOCK:
         with LOCK:
-            cached = FORMATS.get(ident)
-        if cached and time.time() - cached[0] < 600:
-            return cached[1:]
-        info = yt("https://www.youtube.com/watch?v=" + ident)
-        v, a = choose(info)
-        headers = info.get("http_headers") or {}
+            cached = FORMATS.get(key)
+        if cached and time.time() - cached[0] < 120:
+            return cached[1]
+        with db() as con:
+            row = con.execute(
+                "SELECT metadata FROM items WHERE key=?", (key,)
+            ).fetchone()
+        if not row:
+            raise KeyError("Unknown media item")
+        item = json.loads(row[0])
+        info = providers.extract(item["url"])
+        plan = playback.choose(info, CFG["max_height"])
         with LOCK:
-            FORMATS[ident] = (time.time(), v, a, headers)
-        return v, a, headers
+            FORMATS[key] = (time.time(), plan)
+        return plan
 
 
 def token_url(ident, url, headers, ext="ts"):
-    """Map an approved upstream URL to a bounded, opaque, in-memory relay token."""
-    host = urlsplit(url).hostname or ""
-    if not any(
-        host == domain or host.endswith("." + domain)
-        for domain in ("googlevideo.com", "youtube.com")
-    ):
-        raise ValueError("Unexpected upstream host")
-    token = hashlib.sha256(url.encode()).hexdigest()[:32]
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
+        raise ValueError("Upstream must be an HTTP(S) media URL")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        address = None
+    if address and not address.is_global:
+        raise ValueError("Private upstream addresses are not relayed")
+    token = hashlib.sha256(
+        (url + json.dumps(headers, sort_keys=True)).encode()
+    ).hexdigest()[:32]
     with LOCK:
         URLS[(ident, token)] = (url, headers)
-        URLS.move_to_end((ident, token))
         while len(URLS) > 20000:
             URLS.popitem(last=False)
     return f"{local_url()}/hls/{ident}/{token}.{ext}"
 
 
+# Small compatibility helpers for the original public example/tests.
+def choose(info):
+    try:
+        plan = playback.choose(info, CFG["max_height"])
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    return plan["video"], plan.get("audio")
+
+
+def media_info(info, video, audio):
+    return playback.media_info(
+        {
+            "kind": "hls",
+            "video": video,
+            "audio": audio,
+            "duration": info["duration"],
+            "live": False,
+        }
+    )
+
+
+channel_art = providers.channel_art
+
+
 def rewrite(ident, text, base, headers):
-    """Rewrite playlist segments, encryption keys and initialization maps to relay URLs."""
-
-    def uri(match):
-        return (
-            'URI="'
-            + token_url(
-                ident,
-                urljoin(base, match[1]),
-                headers,
-                "mp4" if "#EXT-X-MAP" in line else "key",
-            )
-            + '"'
-        )
-
-    lines = []
-    for line in text.splitlines():
-        if line and not line.startswith("#"):
-            line = token_url(ident, urljoin(base, line), headers)
-        elif 'URI="' in line:
-            line = re.sub(r'URI="([^"]+)"', uri, line)
-        lines.append(line)
-    return "\n".join(lines) + "\n"
+    return playback.rewrite_hls(
+        text, base, headers, lambda url, h, ext: token_url(ident, url, h, ext)
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def handle(self):
+        # Players cancel parallel segment requests when stopping or seeking.
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+
     def log_message(self, *args):
         pass
 
-    def do_HEAD(self):
-        self.route(True)
-
     def do_GET(self):
         self.route(False)
+
+    def do_HEAD(self):
+        self.route(True)
 
     def do_DELETE(self):
         self.send_error(403, "Deletion is not supported")
@@ -670,112 +605,181 @@ class Handler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(raw)
 
+    def relay(self, url, headers, head, ident):
+        """Forward bytes and ranges, rewriting HLS playlists using their real MIME type."""
+        headers = dict(headers)
+        if self.headers.get("Range"):
+            headers["Range"] = self.headers["Range"]
+        with requests.get(
+            url, headers=headers, stream=True, timeout=(8, 40)
+        ) as response:
+            if response.status_code not in (200, 206):
+                return self.send_error(
+                    502, "Upstream playback unavailable; reload to resolve again"
+                )
+            typ = response.headers.get("Content-Type", "application/octet-stream")
+            if "mpegurl" in typ.lower():
+                text = playback.rewrite_hls(
+                    response.text,
+                    response.url or url,
+                    headers,
+                    lambda u, h, e: token_url(ident, u, h, e),
+                )
+                return self.data(text, "application/vnd.apple.mpegurl", head)
+            self.send_response(response.status_code)
+            for name in (
+                "Content-Type",
+                "Content-Length",
+                "Content-Range",
+                "Accept-Ranges",
+            ):
+                if name in response.headers:
+                    self.send_header(name, response.headers[name])
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            if "Content-Length" not in response.headers:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            self.response_started = True
+            if not head:
+                for chunk in response.iter_content(65536):
+                    self.wfile.write(chunk)
+
+    def live(self, plan, ident, head):
+        """Copy-mux live HLS to indefinite TS: no encoding, seeking or disk buffer.
+
+        Stock Rex proxies a Part using its video-file MIME type. Continuous TS
+        therefore works for live Part reads where forwarding a manifest does not.
+        """
+        url = token_url(
+            ident, plan["video"]["url"], playback.headers(plan, plan["video"]), "m3u8"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "video/MP2T")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.response_started = True
+        self.close_connection = True
+        if head:
+            return
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                url,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c",
+                "copy",
+                "-f",
+                "mpegts",
+                "-muxdelay",
+                "0",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            while chunk := process.stdout.read(32768):
+                self.wfile.write(chunk)
+        finally:
+            process.stdout.close()
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
     def route(self, head):
-        response_started = False
+        self.response_started = False
         try:
             path = urlsplit(self.path).path
             if path == "/health":
                 return self.data('{"ok":true}', "application/json", head)
-            match = re.fullmatch(
-                r"/(?:master|stream)/youtube/([\w-]+)/([\w-]{11})(?:\.v2)?\.m3u8", path
-            )
-            if match:
-                channel, ident = match.groups()
+            if path.startswith(("/stream/", "/master/")):
+                relative = path.split("/", 2)[2]
                 with db() as con:
                     row = con.execute(
-                        "SELECT id FROM videos WHERE id=? AND channel_id=? AND info IS NOT NULL",
-                        (ident, channel),
+                        "SELECT key FROM items WHERE relay_path=?", (relative,)
                     ).fetchone()
                 if not row:
                     return self.send_error(404)
-                v, a, headers = resolve(ident)
-                vu = token_url(ident, v["url"], headers, "m3u8")
-                au = token_url(ident, a["url"], headers, "m3u8")
-                master = f'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Original",DEFAULT=YES,AUTOSELECT=YES,URI="{au}"\n#EXT-X-STREAM-INF:BANDWIDTH={int(((v.get("tbr") or 2500)+(a.get("tbr") or 128))*1000)},RESOLUTION={v["width"]}x{v["height"]},CODECS="{v["vcodec"]},mp4a.40.2",AUDIO="audio"\n{vu}\n'
-                return self.data(master, "application/vnd.apple.mpegurl", head)
+                plan = resolve(row[0])
+                ident = hashlib.sha256(row[0].encode()).hexdigest()[:24]
+
+                def relay(u, h, e):
+                    return token_url(ident, u, h, e)
+
+                if plan["kind"] == "live":
+                    return self.live(plan, ident, head)
+                if plan["kind"] == "hls":
+                    text, url = playback.hls_master(plan, relay)
+                    return (
+                        self.data(text, "application/vnd.apple.mpegurl", head)
+                        if text
+                        else self.relay(
+                            plan["video"]["url"],
+                            playback.headers(plan, plan["video"]),
+                            head,
+                            ident,
+                        )
+                    )
+                if plan["kind"] == "dash":
+                    return self.data(
+                        playback.dash_manifest(plan, relay),
+                        "application/dash+xml",
+                        head,
+                    )
+                return self.relay(
+                    plan["video"]["url"],
+                    playback.headers(plan, plan["video"]),
+                    head,
+                    ident,
+                )
             match = re.fullmatch(
-                r"/hls/([\w-]{11})/([0-9a-f]{32})\.(?:m3u8|ts|mp4|key)", path
+                r"/hls/([\w-]+)/([0-9a-f]{32})\.(?:m3u8|ts|mp4|webm|key)", path
             )
             if not match:
                 return self.send_error(404)
             with LOCK:
                 upstream = URLS.get(match.groups())
-            # Evicted tokens cannot be reconstructed from the request. The player must
-            # reload its master playlist, which refreshes the upstream URLs.
             if not upstream:
                 return self.send_error(410, "Reload the playlist to refresh playback")
-            url, headers = upstream
-            headers = dict(headers)
-            if self.headers.get("Range"):
-                headers["Range"] = self.headers["Range"]
-            with requests.get(
-                url, headers=headers, stream=True, timeout=(8, 40)
-            ) as response:
-                if response.status_code not in (200, 206):
-                    return self.send_error(
-                        502, "YouTube stream unavailable; reload to refresh"
-                    )
-                typ = response.headers.get("Content-Type", "application/octet-stream")
-                # YouTube segment URLs can contain '.m3u8'; only MIME type identifies
-                # manifests. Decoding a binary segment as text would corrupt playback.
-                if "mpegurl" in typ.lower():
-                    return self.data(
-                        rewrite(match[1], response.text, url, headers),
-                        "application/vnd.apple.mpegurl",
-                        head,
-                    )
-                self.send_response(response.status_code)
-                for key in (
-                    "Content-Type",
-                    "Content-Length",
-                    "Content-Range",
-                    "Accept-Ranges",
-                ):
-                    if key in response.headers:
-                        self.send_header(key, response.headers[key])
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Cache-Control", "no-store")
-                if "Content-Length" not in response.headers:
-                    self.send_header("Connection", "close")
-                    self.close_connection = True
-                self.end_headers()
-                response_started = True
-                if not head:
-                    # Forward bounded chunks rather than buffering a video or writing it to disk.
-                    for chunk in response.iter_content(65536):
-                        self.wfile.write(chunk)
+            return self.relay(*upstream, head, match[1])
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as error:
             LOG.warning(
-                "Stream request failed: %s (errno=%s)",
-                type(error).__name__,
-                getattr(error, "errno", None),
+                "Playback failed: %s: %s", type(error).__name__, str(error)[:200]
             )
-            # A second HTTP response would corrupt the media already being sent.
-            # Closing lets the player detect a short read and retry the segment.
-            if response_started:
+            if self.response_started:
                 self.close_connection = True
-                return
-            try:
-                self.send_error(502, "Stream resolution failed; retry shortly")
-            except OSError:
-                pass
+            else:
+                self.send_error(502, "Playback resolution failed; see service log")
 
 
 def worker():
     while not STOP.is_set():
         try:
             sync()
-        except Exception:
-            LOG.exception("Sync failed; will retry")
+        except Exception as error:
+            LOG.warning("Refresh failed: %s", str(error)[:250])
         STOP.wait(CFG["interval_seconds"])
 
 
 def main():
     if not CONFIG_PATH.exists():
         raise SystemExit(
-            "Create config/config.json from config/config.example.json and set your Rex address."
+            "Create config/config.json from config/config.example.json first."
         )
     (ROOT / "logs").mkdir(exist_ok=True)
     logging.basicConfig(
@@ -791,9 +795,9 @@ def main():
     init_db()
     server = ThreadingHTTPServer((CFG["host"], CFG["port"]), Handler)
     server.daemon_threads = True
-    threading.Thread(target=worker, daemon=True, name="youtube-sync").start()
+    threading.Thread(target=worker, daemon=True, name="source-sync").start()
     LOG.info(
-        "YouTube relay listening on port %s; metadata only, no media cache", CFG["port"]
+        "rex-youtube listening on port %s; metadata only, no media cache", CFG["port"]
     )
     try:
         server.serve_forever()

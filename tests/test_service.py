@@ -1,4 +1,5 @@
 import unittest
+import json
 from unittest.mock import patch
 import service as s
 
@@ -94,14 +95,30 @@ class Tests(unittest.TestCase):
                     ("lastyear", "2025-12-31", 8),
                 ]:
                     con.execute(
-                        "INSERT INTO videos(id,channel_id,published,episode,info,status) VALUES(?,?,?,?,?,?)",
-                        (ident, "channel", date, number, "{}", "published"),
+                        "INSERT INTO items VALUES(?,?,?,?,?,?)",
+                        (
+                            ident,
+                            json.dumps(
+                                {
+                                    "key": ident,
+                                    "provider": "youtube",
+                                    "creator_id": "channel",
+                                    "kind": "episode",
+                                    "published": date,
+                                    "episode": number,
+                                }
+                            ),
+                            ident,
+                            ident + ".mp4",
+                            None,
+                            "published",
+                        ),
                     )
             s.reorder("channel")
             with s.db() as con:
                 rows = {
-                    r["id"]: (r["episode"], r["status"])
-                    for r in con.execute("SELECT * FROM videos")
+                    r["key"]: (json.loads(r["metadata"])["episode"], r["status"])
+                    for r in con.execute("SELECT * FROM items")
                 }
             self.assertEqual(
                 rows,

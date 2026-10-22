@@ -1,2 +1,2 @@
-# One YouTube channel URL per line; optionally append | Show name
-https://www.youtube.com/@Dropping-Names | Dropping Names
+# Legacy filename; new installs can use sources.txt instead.
+https://www.youtube.com/@TechnologyConnections
