@@ -71,7 +71,7 @@ Rex's feed currently accepts video file labels, rather than `.m3u8`/`.mpd` file 
 
 Signed playback URLs, anonymous cookies and extractor headers live only in RAM and are refreshed close to playback (120-second resolution cache). No complete media file or persistent media cache is created. Rex still uses its normal temporary transcoder output. Artwork is converted to JPEG in memory and stored by Rex.
 
-For live playback only, a small FFmpeg process copies the selected HLS streams into MPEG-TS so Rex's Part endpoint serves actual video bytes. It does **not** encode or save the broadcast. Continuous Twitch and TikTok live playback through that endpoint was verified for 12 seconds each; indefinite playback, Plex Web's unknown-duration behavior and recovery from broadcaster discontinuities are not guaranteed. A client disconnect stops the muxer; reopening resolves a fresh stream. An ended broadcast disappears on the next successful offline poll.
+For live playback only, a small FFmpeg process copies the selected HLS streams into MPEG-TS so Rex's Part endpoint serves actual video bytes. It does **not** encode or save the broadcast. Continuous Twitch and TikTok live playback through that endpoint was verified for 12 seconds each; indefinite playback, Plex Web's unknown-duration behavior and recovery from broadcaster discontinuities are not guaranteed. Plex Web did not advance on the tested TikTok live item even though Rex’s continuous Part decoded it; browser live playback remains an open compatibility limit. A client disconnect stops the muxer; reopening resolves a fresh stream. An ended broadcast disappears on the next successful offline poll.
 
 ## Verification
 
@@ -106,6 +106,8 @@ venv/bin/python scripts/probe_sites.py --collections --rex-bin /path/to/rex-serv
 venv/bin/python scripts/probe_sites.py --site live-only --live-url https://www.twitch.tv/CHANNEL --rex-bin /path/to/rex-server
 venv/bin/python scripts/probe_sites.py --site live-only --live-url https://www.tiktok.com/@weathernewslive/live --rex-bin /path/to/rex-server
 ```
+
+Continuous Vimeo playback also passed in Plex Web, but a far seek into its HLS stream stalled.
 
 The upstream `tests/test_native_transcode.py` suite was also run against this Rex build and FFmpeg 7.1.5: **247/250 checks passed**. The failures were a far-seek timestamp expectation, a Vorbis tone check and an HDR conversion color-tag check. These are upstream playback limits to investigate, not a claim that every format works. To repeat it, follow Rex's native test instructions and set `REX_SERVER` and `REX_TRANSCODER` to your binaries. A clean upstream Rust playback unit-test build is also available:
 
