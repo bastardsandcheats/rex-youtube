@@ -355,14 +355,14 @@ class SourceContractTests(unittest.TestCase):
                 },
             ]
             with (
-                patch.object(s, "rex", side_effect=replies),
+                patch.object(s, "rex", side_effect=replies) as rex,
                 patch.object(s, "ensure_library", return_value="1"),
                 patch.object(s, "edit") as edit,
                 patch.object(s, "upload_art"),
             ):
                 s.publish(row)
-            fields = edit.call_args_list[0].args[2]
-            self.assertEqual(fields["year"], 2026)
-            self.assertEqual(fields["studio"], "YouTube")
-            self.assertNotIn("summary", fields)
-            self.assertNotIn("summary", edit.call_args_list[1].args[2])
+            display = rex.call_args_list[0].args[2]["items"][0]["display"]
+            self.assertEqual(display["date"], "2026-01-02")
+            self.assertNotIn("summary", display)
+            self.assertNotIn("summary", display["show"])
+            edit.assert_not_called()

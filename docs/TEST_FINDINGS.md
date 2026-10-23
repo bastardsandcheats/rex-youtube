@@ -17,6 +17,19 @@ The service now has one YAML settings format, shared code in `app/`, and site-on
 
 These are bounded sample checks, not an assertion that every upload, full-length video or player works. The generated local `reports/suite.md` and `reports/configured.md` contain the individual stage results; rerun the commands in the checking guide to regenerate them.
 
+## Addon guide and collection update — 23 October 2026
+
+Reviewed against [Building rex addons](https://notes.debridmediamanager.com/guides/rex-addons/) and PlexControl's static collection implementation. Source titles/artwork now use feed `display`; unchanged known source-created scalar locks can be released without overwriting different user edits. Uploaded posters are retained. Existing episode placements stay fixed, metadata refresh is bounded, selected formats are pinned, and changed delivery/probe layouts get distinct feed versions. Progressive payloads include an exact byte size when known.
+
+- **95 offline tests passed**, including display payloads, source-lock migration, stable backfills, pinned/versioned formats, optional full/no probing, YAML compatibility, snapshots/session recovery, failed-source safety, shared ownership, capped discovery and collection GUID protection. Formatting and lint checks passed.
+- A disposable instance of installed Rex **`9671faa2dda20abff12a37885ab2dc0b4bcffccb`** accepted native titles, two channel shows in one static collection, a movie in a separate collection, and a complete snapshot. Changing an indexed channel from show presentation to collection/movie presentation also produced a movie successfully.
+- One real YouTube HLS item used the full ffprobe mode against its actual relay, then decoded video/audio for three seconds through that Rex executable. No MIME patch was applied.
+- The existing private YAML and public commented template both validate with the additive settings. The active catalog/settings are backed up before deployment; no library reset is required.
+
+This was focused validation, not another six-site client walkthrough or long-running live test. `probe: false` intentionally trusts extractor metadata and can miss incorrect track layouts. Manual provider checks still probe/decode to measure those limits. Source removals withdraw only orphaned catalog entries; a capped window does not remove older cached uploads. Collections remain per-library/type and are never mixed across libraries.
+
+Daily per-site polling and unlimited discovery (`max_items: 0`) are covered by settings tests. Listings are re-read rather than resumed with an upstream cursor; cached metadata avoids unnecessary extraction. Plex Web live playback remains unresolved; native playback success does not establish browser support.
+
 ## Tested revisions
 
 - Browser walkthrough: Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc`, with the former manifest MIME patch.

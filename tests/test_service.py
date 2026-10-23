@@ -78,7 +78,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(params["title.value"], "YouTube title")
         self.assertEqual(params["summary.locked"], 1)
 
-    def test_upload_years_have_separate_chronological_episode_numbers(self):
+    def test_existing_episode_numbers_stay_fixed_per_year(self):
         import tempfile
         from pathlib import Path
 
@@ -121,7 +121,11 @@ class Tests(unittest.TestCase):
                 }
             self.assertEqual(
                 rows,
-                {"older": (1, "ready"), "new": (2, "ready"), "lastyear": (1, "ready")},
+                {
+                    "older": (9, "published"),
+                    "new": (1, "published"),
+                    "lastyear": (8, "published"),
+                },
             )
 
     def test_webp_thumbnail_is_uploaded_as_real_jpeg(self):

@@ -53,6 +53,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings["season"], 2)
         self.assertEqual(settings["name"], "My workshop")
 
+    def test_unlimited_discovery_and_daily_site_poll(self):
+        data = document()
+        site = data["sites"]["youtube"]
+        site["max_items"] = 0
+        site["interval_seconds"] = 86400
+        del site["sources"][0]["max_items"]
+        settings = config.normalize(data)["source_entries"][0]["options"]
+        self.assertEqual(settings["max_items"], 0)
+        self.assertEqual(settings["interval_seconds"], 86400)
+
     def test_comments_are_accepted_and_never_rewritten_on_load(self):
         with tempfile.TemporaryDirectory() as root:
             p = Path(root, "config/config.yml")
@@ -74,7 +84,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_values_and_misspellings_fail_before_scan(self):
         for field, value in [
-            ("max_items", 0),
+            ("max_items", -1),
             ("max_items", True),
             ("year_seasons", "false"),
             ("type", "series"),

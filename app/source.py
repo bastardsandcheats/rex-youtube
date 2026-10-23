@@ -252,6 +252,8 @@ def apply_settings(item, settings, context=None):
         ),
     )
     kind = settings.get("type", "auto")
+    if kind == "collection":
+        kind = settings.get("collection_type", "movie")
     item["kind"] = (
         "movie"
         if item["is_live"] or kind == "movie"
@@ -277,6 +279,17 @@ def apply_settings(item, settings, context=None):
         else "library" if item["kind"] == "episode" else "movie_library"
     )
     item["library_name"] = settings.get(field)
+    item["probe"] = settings.get("probe", "headers")
+    item["refresh_hours"] = settings.get("refresh_hours", 24)
+    collection = settings.get("collection", False)
+    if item["is_live"]:
+        collection = settings.get("live_collection", True)
+        default_title = SOURCES.get(item["provider"], item["provider"].title())
+    else:
+        if settings.get("type") == "collection" and collection is False:
+            collection = True
+        default_title = name or item["creator_name"]
+    item["collection"] = default_title if collection is True else collection or ""
     return item
 
 

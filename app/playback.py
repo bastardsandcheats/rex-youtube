@@ -300,3 +300,108 @@ def dash_manifest(plan, relay):
             if fragment.get("range"):
                 entry.set("mediaRange", str(fragment["range"]))
     return ET.tostring(root, encoding="unicode")
+
+
+def selection(plan):
+    """Persist delivery characteristics and format IDs, never signed URLs/headers."""
+
+    def track(fmt, audio=False):
+        if not fmt:
+            return None
+        return {
+            key: fmt.get(key)
+            for key in (
+                ("format_id", "acodec", "audio_channels", "asr")
+                if audio
+                else ("format_id", "vcodec", "width", "height", "fps", "acodec")
+            )
+        }
+
+    return {
+        "kind": plan["kind"],
+        "video": track(plan["video"]),
+        "audio": track(plan.get("audio"), True),
+    }
+
+
+def delivery_changed(old, new):
+    """Enrich old catalogs without resetting identities just for the new bookkeeping."""
+    if old.get("selection"):
+        return old["selection"] != new["selection"]
+
+    def video(item):
+        streams = item.get("media_info", {}).get("streams", [])
+        row = next((s for s in streams if s.get("codec_type") == "video"), {})
+        return (row.get("codec_name"), row.get("width"), row.get("height"))
+
+    return old.get("delivery") != new.get("delivery") or video(old) != video(new)
+
+
+def choose_pinned(info, max_height, wanted):
+    """A URL refresh may change signatures/expiry, but never the advertised formats."""
+    if not wanted:
+        return choose(info, max_height)
+    ids = {
+        str(t["format_id"])
+        for t in (wanted.get("video"), wanted.get("audio"))
+        if t and t.get("format_id") is not None
+    }
+    candidates = [
+        f for f in info.get("formats", []) if not ids or str(f.get("format_id")) in ids
+    ]
+    plan = choose({**info, "formats": candidates}, max_height)
+    if selection(plan) != wanted:
+        raise ValueError(
+            "Published formats changed; waiting for a refreshed media version"
+        )
+    return plan
+
+
+def full_probe(url):
+    """Read the served representation's headers and return the entire ffprobe object."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-rw_timeout",
+            "15000000",
+            "-read_intervals",
+            "%+2",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-of",
+            "json",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=40,
+    )
+    if result.returncode:
+        raise ValueError("Media probe failed")
+    data = json.loads(result.stdout)
+    if not data.get("streams"):
+        raise ValueError("Media probe found no streams")
+    # format.filename is our relay URL, never an expiring upstream credential.
+    return data
+
+
+def stream_layout(data):
+    """Only playback-significant probe fields, without volatile tags/URL timestamps."""
+    fields = (
+        "index",
+        "codec_type",
+        "codec_name",
+        "width",
+        "height",
+        "channels",
+        "sample_rate",
+    )
+    return sorted(
+        [
+            tuple(str(stream.get(field, "")) for field in fields)
+            for stream in data.get("streams", [])
+        ]
+    )

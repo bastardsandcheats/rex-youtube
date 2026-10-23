@@ -416,9 +416,9 @@ def evaluate(url, *, seconds=4, expected_kind=None, progress=None, settings=None
         # Keep descriptions/report size bounded even for unexpectedly large pages.
         report["item"]["description"] = report["item"]["description"][:2000]
         stage = "formats"
-        plan = playback.inspect_layout(
-            playback.choose(info, settings.get("max_height", 1080))
-        )
+        plan = playback.choose(info, settings.get("max_height", 1080))
+        if settings.get("probe", "headers") == "headers":
+            playback.inspect_layout(plan)
         record(
             stage,
             "passed",

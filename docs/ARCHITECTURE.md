@@ -10,6 +10,7 @@ app/
   source.py                Shared yt-dlp extraction and metadata normalization
   playback.py              Format selection, media metadata and manifest rewriting
   live.py                  Bounded RAM buffering and live copy-muxing
+  collections.py           Owned static Rex collections, scoped per library/type
   service.py               SQLite catalog, Rex feed client, HTTP server and poller
   checks.py                Isolated, read-only provider checks
   reporting.py             Generated inventories and Markdown/JSON reports
@@ -45,7 +46,7 @@ flowchart TD
     enrich --> normalize["Normalize metadata<br/>Apply name, type and season settings"]
     normalize --> plan["Choose formats and verify muxed HLS track order"]
     plan --> sqlite["Small metadata SQLite catalog"]
-    sqlite --> feed["Publish placement and metadata<br/>through Rex APIs"]
+    sqlite --> feed["Publish placement and display<br/>through Rex APIs"]
     feed --> rex["Rex library and clients"]
 ```
 
@@ -92,3 +93,9 @@ The normal checks do not invoke Rex, publish to its feed, or alter the running s
 The stages are discovery, extraction, metadata completeness, format selection, artwork access, relay headers, declared-versus-observed feed tracks, decoded playback and seeking. Missing descriptions/posters can produce a partial result while decoded playback still passes. An offline source is distinct from a source that extracted successfully but failed to decode. Skipped live/experimental fixtures are listed explicitly.
 
 The [checking guide](CHECKING_PROVIDERS.md) explains commands, the HTTP endpoint and result levels. The [provider contract](PROVIDER_CONTRACT.md) shows the output a custom extractor must supply. Offline regression tests separately cover configuration, identity, normalization, HTTP behavior, worker isolation, report generation and provider discovery.
+
+## Refresh and collection ownership
+
+Source URLs own catalog rows through `item_sources`. Failed or capped listings retain cached inventory. After a successful round, unowned rows are withdrawn; complete snapshots reconcile all published cached items. `retired_versions` persists withdrawals when a delivery layout changes. Format IDs/layout are pinned while only signed URLs refresh. Episode numbers are allocated once per placement group.
+
+`app/collections.py` follows the static collection create/member APIs used by PlexControl. It maps episode memberships to their shows, scopes groups by library/type and records each created collection's GUID before changing membership. User collections are not adopted. Probe mode and collection presentation are independent YAML options.

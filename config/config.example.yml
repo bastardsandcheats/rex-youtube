@@ -11,6 +11,7 @@ rex:
   source_id: youtube             # Keep this stable when upgrading an existing catalog.
 
 scan:
+  snapshot_hours: 6              # Complete cached inventory; skipped after failed/incomplete scans.
   interval_seconds: 900
   batch_size: 5                   # New items per source, per poll.
   max_items: 1000                 # Latest collection entries considered per poll.
@@ -20,7 +21,13 @@ playback:
   live_buffer_mb: 16              # RAM read-ahead per live playback (1–64 MiB).
 
 defaults:                        # Inherited by sites, then by their source entries.
-  # type defaults to auto; sources can override it with show, movie or live.
+  # type defaults to auto; override with show, movie, live or collection.
+  probe: headers                 # true: full ffprobe JSON from the relay; false: no probe.
+                                 # headers: existing lightweight muxed-HLS track check.
+  refresh_hours: 24              # Refresh existing titles/descriptions/artwork in bounded batches.
+  collection: false              # true: channel-named collection; or supply a shared name.
+  collection_type: movie         # With type: collection, uploads become movies (or show).
+  live_collection: true          # Group the Live Streams library by site; or set a name/false.
   year_seasons: true              # false puts a show's episodes into `season` below.
   season: 1
   check_live: false               # Check a supported channel's separate live URL too.
@@ -32,6 +39,10 @@ sites:
     movie_library: YouTube Videos
     live_library: Live Streams    # Shared by all sites unless overridden here.
     check_live: false
+    # probe: false               # Site override: rely on extractor metadata without ffprobe.
+    # collection: Learning      # Add channel shows to this collection without changing type.
+    # max_items: 0              # Discover every upload rather than a capped window.
+    # interval_seconds: 86400   # Poll this site daily; 0 inherits the worker interval.
     max_items: 100                 # Site default; individual sources can override it.
     sources:
       - url: https://www.youtube.com/@TechnologyConnections/videos
@@ -107,3 +118,20 @@ sites:
     sources:
       - url: https://www.bilibili.com/video/BV15z4y1F7tK/
         type: movie
+
+# Group several associated channels without merging their shows:
+# sites:
+#   youtube:
+#     sources:
+#       - url: https://www.youtube.com/@level1techs/videos
+#         type: show
+#         collection: Level1Techs
+#       - url: https://www.youtube.com/@Level1Linux/videos
+#         type: show
+#         collection: Level1Techs
+# To make a channel's uploads individual films in a named collection instead:
+#       - url: https://www.youtube.com/@level1techs/videos
+#         type: collection
+#         collection: Level1Techs
+#         probe: false
+# Do not add a second `sites` block; merge examples into the existing one.

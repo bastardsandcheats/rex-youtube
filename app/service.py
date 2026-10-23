@@ -25,6 +25,7 @@ import requests
 from PIL import Image, ImageOps
 
 from app import config
+from app import collections as rex_collections
 from app import playback
 from app import live
 from app import source as providers
@@ -162,8 +163,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS items(key TEXT PRIMARY KEY,metadata TEXT NOT NULL,
             feed_id TEXT NOT NULL,relay_path TEXT NOT NULL,rating_key TEXT,
             status TEXT NOT NULL DEFAULT 'ready');
+        CREATE TABLE IF NOT EXISTS retired_versions(id TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS item_sources(source TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(source,key));
         CREATE TABLE IF NOT EXISTS failures(url TEXT PRIMARY KEY,checked REAL,error TEXT);
         """)
+        # Additive ownership bookkeeping keeps existing YAML/catalogs usable.
+        con.execute(
+            "INSERT OR IGNORE INTO item_sources SELECT json_extract(metadata,'$.source_entry'),key FROM items WHERE json_extract(metadata,'$.source_entry') IS NOT NULL"
+        )
 
 
 def library_name(item):
@@ -230,14 +237,39 @@ def setup_rex():
     )
 
 
+def catalog_rows():
+    with db() as con:
+        return [dict(row) for row in con.execute("SELECT * FROM items")]
+
+
 def save_item(item, plan, source_entry):
-    """Persist canonical metadata, never the signed formats and anonymous cookies."""
+    """Keep source identity, but give changed delivery layouts their own Rex version."""
     item = {
         **item,
         "media_info": playback.media_info(plan),
         "delivery": plan["kind"],
         "source_entry": source_entry,
+        "checked": time.time(),
+        "selection": playback.selection(plan),
+        "size": plan["video"].get("filesize") if plan["kind"] == "http" else None,
     }
+    if plan["kind"] == "http" and not item.get("size"):
+        try:
+            response = requests.head(
+                plan["video"]["url"],
+                headers=playback.headers(plan, plan["video"]),
+                timeout=(5, 8),
+            )
+            length = response.headers.get("Content-Length", "")
+            if (
+                response.status_code == 200
+                and length.isdigit()
+                and not response.headers.get("Content-Encoding")
+            ):
+                item["size"] = int(length)
+            response.close()
+        except requests.RequestException:
+            pass
     suffix = playback.extension(plan)
     digest = hashlib.sha256(item["key"].encode()).hexdigest()[:24]
     directory = item["provider"] + (
@@ -247,66 +279,160 @@ def save_item(item, plan, source_entry):
         previous = con.execute(
             "SELECT * FROM items WHERE key=?", (item["key"],)
         ).fetchone()
-        if previous:
-            old = json.loads(previous["metadata"])
-            item["episode"] = old.get("episode", 1)
-            con.execute(
-                "UPDATE items SET metadata=?,status='ready' WHERE key=?",
-                (json.dumps(item), item["key"]),
+        old = json.loads(previous["metadata"]) if previous else {}
+        item["native_display"] = True
+        if old and not old.get("native_display"):
+            item["legacy_display"] = old.get("legacy_display", old)
+        same_group = (old.get("kind"), old.get("creator_id"), old.get("season")) == (
+            item["kind"],
+            item["creator_id"],
+            item.get("season"),
+        )
+        item["episode"] = old.get("episode", 0) if same_group else 0
+        # A refresh lacking optional metadata must not erase an existing description/artwork.
+        for field in ("description", "thumbnail", "creator_description", "creator_art"):
+            if not item.get(field) and old.get(field):
+                item[field] = old[field]
+        changed = previous and playback.delivery_changed(old, item)
+        version = hashlib.sha256(
+            json.dumps(item["selection"], sort_keys=True).encode()
+        ).hexdigest()[:16]
+        feed_id = (
+            item["key"] + ":" + version
+            if changed
+            else previous["feed_id"] if previous else item["key"]
+        )
+        path = (
+            f"{directory}/{digest}-{version}.{suffix}"
+            if changed
+            else (
+                previous["relay_path"] if previous else f"{directory}/{digest}.{suffix}"
             )
-        else:
-            item["episode"] = 1
+        )
+        if changed:
             con.execute(
-                "INSERT INTO items VALUES(?,?,?,?,?,?)",
-                (
-                    item["key"],
-                    json.dumps(item),
-                    item["key"],
-                    f"{directory}/{digest}.{suffix}",
-                    None,
-                    "ready",
-                ),
+                "INSERT OR IGNORE INTO retired_versions VALUES(?)",
+                (previous["feed_id"],),
             )
+        status = "probing" if item.get("probe") is True else "ready"
+        con.execute(
+            "INSERT INTO items VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET metadata=excluded.metadata,feed_id=excluded.feed_id,relay_path=excluded.relay_path,status=excluded.status",
+            (item["key"], json.dumps(item), feed_id, path, None, status),
+        )
+        con.execute(
+            "INSERT OR IGNORE INTO item_sources VALUES(?,?)",
+            (source_entry, item["key"]),
+        )
     with LOCK:
         FORMATS[item["key"]] = (time.time(), plan)
+    reorder(item["creator_id"])
+    if status == "probing":
+        try:
+            # Probe the actual rewritten relay, not an upstream format we do not serve.
+            measured = playback.full_probe(local_url() + "/stream/" + path)
+            with db() as con:
+                current = json.loads(
+                    con.execute(
+                        "SELECT metadata FROM items WHERE key=?", (item["key"],)
+                    ).fetchone()[0]
+                )
+                current["media_info"] = measured
+                if previous and playback.stream_layout(
+                    old.get("media_info", {})
+                ) != playback.stream_layout(measured):
+                    # Correcting an inferred probe also needs a new Rex media version.
+                    measured_version = hashlib.sha256(
+                        json.dumps(
+                            [item["selection"], playback.stream_layout(measured)],
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest()[:16]
+                    measured_id = item["key"] + ":" + measured_version
+                    measured_path = f"{directory}/{digest}-{measured_version}.{suffix}"
+                    con.execute(
+                        "INSERT OR IGNORE INTO retired_versions VALUES(?)",
+                        (previous["feed_id"],),
+                    )
+                    con.execute(
+                        "UPDATE items SET feed_id=?,relay_path=? WHERE key=?",
+                        (measured_id, measured_path, item["key"]),
+                    )
+                if (
+                    current["delivery"] == "http"
+                    and str(measured.get("format", {}).get("size", "")).isdigit()
+                ):
+                    current["size"] = int(measured["format"]["size"])
+                con.execute(
+                    "UPDATE items SET metadata=?,status='ready' WHERE key=?",
+                    (json.dumps(current), item["key"]),
+                )
+        except Exception:
+            with db() as con:
+                con.execute(
+                    "UPDATE items SET status='error' WHERE key=?", (item["key"],)
+                )
+            raise
 
 
 def reorder(creator_id):
-    """Backfilled videos may renumber a year, but feed IDs and watch state stay stable."""
+    """Assign numbers only to new placements. Backfills never renumber existing uploads."""
     with db() as con:
         rows = [
             (r, json.loads(r["metadata"])) for r in con.execute("SELECT * FROM items")
         ]
-        counts = collections.Counter()
-        for row, item in sorted(
-            rows,
-            key=lambda r: (r[1]["published"], r[1].get("timestamp", 0), r[1]["key"]),
-        ):
-            if item["kind"] != "episode" or item["creator_id"] != creator_id:
-                continue
-            group = (
-                item["provider"],
-                item.get("season", int(item["published"][:4] or 0)),
-            )
-            counts[group] += 1
-            if item.get("episode") != counts[group]:
-                item["episode"] = counts[group]
+        groups = collections.defaultdict(list)
+        for row, item in rows:
+            if item["kind"] == "episode" and item["creator_id"] == creator_id:
+                groups[
+                    (
+                        item["provider"],
+                        item.get("season", int(item["published"][:4] or 0)),
+                        item.get("library_name"),
+                    )
+                ].append((row, item))
+        for members in groups.values():
+            number = max((item.get("episode", 0) for _, item in members), default=0)
+            for row, item in sorted(
+                members,
+                key=lambda r: (
+                    r[1]["published"],
+                    r[1].get("timestamp", 0),
+                    r[1]["key"],
+                ),
+            ):
+                if item.get("episode", 0):
+                    continue
+                number += 1
+                item["episode"] = number
                 con.execute(
-                    "UPDATE items SET metadata=?,status='ready' WHERE key=?",
+                    "UPDATE items SET metadata=? WHERE key=?",
                     (json.dumps(item), row["key"]),
                 )
 
 
-def publish(row):
-    """Feed explicit placements, then apply the source's custom title and artwork."""
+def feed_item(row):
+    """Source display is metadata, not a locked user edit: Rex respects the user's changes."""
     item = json.loads(row["metadata"])
-    # Upstream accepts video file labels, not manifest extensions. `path` remains
-    # the actual manifest URL; `file` is a logical Part label, never a disk file.
-    file = (
-        "/rex-youtube/"
-        + row["relay_path"].rsplit(".", 1)[0]
-        + (".ts" if item["is_live"] else ".mp4")
-    )
+    display = {"title": item["title"]}
+    for source, target in (
+        ("description", "summary"),
+        ("published", "date"),
+        ("thumbnail", "thumb"),
+    ):
+        if item.get(source):
+            display[target] = item[source]
+    if item["kind"] == "episode":
+        show = {"title": item["creator_name"]}
+        if item.get("creator_description"):
+            show["summary"] = item["creator_description"]
+        if item.get("creator_art"):
+            show["poster"] = item["creator_art"]
+            display["season"] = {"poster": item["creator_art"]}
+        display["show"] = show
+    # HLS now has its real extension; DASH still uses a logical video file label.
+    file = "/rex-youtube/" + row["relay_path"]
+    if item["delivery"] == "dash":
+        file = file.rsplit(".", 1)[0] + ".mp4"
     payload = {
         "id": row["feed_id"],
         "path": row["relay_path"],
@@ -320,12 +446,84 @@ def publish(row):
         ),
         "kind": item["kind"],
         "media_info": item["media_info"],
+        "display": display,
     }
     if item["kind"] == "episode":
         payload.update(
             season=item.get("season", int(item["published"][:4] or 0)),
             episode=item["episode"],
         )
+    if item.get("size") and item["delivery"] == "http":
+        payload["size"] = item["size"]
+    return payload
+
+
+def retire_versions():
+    """Retry version withdrawals after a crash; new versions have distinct file labels."""
+    with db() as con:
+        con.execute(
+            "DELETE FROM retired_versions WHERE id IN (SELECT feed_id FROM items)"
+        )
+        ids = [r[0] for r in con.execute("SELECT id FROM retired_versions")]
+    for offset in range(0, len(ids), 200):
+        chunk = ids[offset : offset + 200]
+        rex("DELETE", "/rex/feed/" + CFG["source"] + "/items", {"ids": chunk})
+        with db() as con:
+            con.executemany(
+                "DELETE FROM retired_versions WHERE id=?", [(key,) for key in chunk]
+            )
+
+
+def release_source_locks(row, item):
+    """Migrate old source-created scalar locks only when the value still matches our cache.
+
+    Differing user edits and uploaded posters stay untouched. New feed display never locks.
+    """
+    old = item.get("legacy_display")
+    if not old and item.get("native_display"):
+        return
+    old = old or item
+    if not row.get("rating_key"):
+        return
+    leaf = rex_collections.entries(rex("GET", "/library/metadata/" + row["rating_key"]))
+    if not leaf:
+        return
+    fields = {
+        "title": old["title"],
+        "summary": old.get("description"),
+        "originallyAvailableAt": old.get("published"),
+    }
+    targets = [(leaf[0], fields, 4 if old["kind"] == "episode" else 1)]
+    if old["kind"] == "episode" and leaf[0].get("grandparentRatingKey"):
+        parents = rex_collections.entries(
+            rex("GET", "/library/metadata/" + str(leaf[0]["grandparentRatingKey"]))
+        )
+        if parents:
+            targets.append(
+                (
+                    parents[0],
+                    {
+                        "title": old["creator_name"],
+                        "summary": old.get("creator_description"),
+                    },
+                    2,
+                )
+            )
+    for remote, expected, kind in targets:
+        params = {
+            field + ".locked": 0
+            for field, value in expected.items()
+            if value and remote.get(field) == value
+        }
+        if params:
+            params["type"] = kind
+            rex("PUT", "/library/metadata/" + str(remote["ratingKey"]), params=params)
+
+
+def publish(row):
+    item = json.loads(row["metadata"])
+    release_source_locks(row, item)
+    payload = feed_item(row)
     response = rex(
         "POST", "/rex/feed/" + CFG["source"] + "/items", {"items": [payload]}
     )
@@ -335,51 +533,14 @@ def publish(row):
     receipt = next(
         r for r in receipts if r["id"] == row["feed_id"] and not r.get("deleted")
     )
-    key = str(receipt["ratingKey"])
-    fields = {
-        "title": item["title"],
-        "studio": providers.SOURCES.get(item["provider"], item["provider"].title()),
-    }
-    if item.get("description"):
-        fields["summary"] = item["description"]
-    if item["published"]:
-        fields["originallyAvailableAt"] = item["published"]
-        fields["year"] = int(item["published"][:4])
-    edit(key, 4 if item["kind"] == "episode" else 1, fields)
-    meta = rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
-    if item.get("thumbnail"):
-        try:
-            upload_art(key, item["thumbnail"])
-        except Exception as error:
-            LOG.warning(
-                "Thumbnail unavailable for %s: %s", row["key"], type(error).__name__
-            )
-    if item["kind"] == "episode":
-        parent = meta.get("grandparentRatingKey")
-        if parent:
-            creator_fields = {"title": item["creator_name"], "studio": fields["studio"]}
-            if item.get("creator_description"):
-                creator_fields["summary"] = item["creator_description"]
-            if item.get("creator_year"):
-                creator_fields["year"] = int(item["creator_year"])
-            edit(parent, 2, creator_fields)
-        # Prefer creator artwork; use an episode thumbnail when an extractor has no avatar.
-        creator_art = item.get("creator_art") or item.get("thumbnail")
-        if creator_art:
-            for owner in (parent, meta.get("parentRatingKey")):
-                if owner:
-                    try:
-                        upload_art(owner, creator_art)
-                    except Exception as error:
-                        LOG.warning(
-                            "Channel artwork unavailable: %s", type(error).__name__
-                        )
+    item["native_display"] = True
+    item.pop("legacy_display", None)
     with db() as con:
         con.execute(
-            "UPDATE items SET rating_key=?,status='published' WHERE key=?",
-            (key, row["key"]),
+            "UPDATE items SET rating_key=?,status='published',metadata=? WHERE key=?",
+            (str(receipt["ratingKey"]), json.dumps(item), row["key"]),
         )
-    LOG.info("Published %s: %s", item["provider"], item["title"])
+    LOG.info("Published %s: %s", json.loads(row["metadata"])["provider"], row["key"])
 
 
 def flush_ready():
@@ -388,11 +549,16 @@ def flush_ready():
         rows = [
             dict(r) for r in con.execute("SELECT * FROM items WHERE status='ready'")
         ]
+    success = True
     for row in rows:
         try:
             publish(row)
         except Exception as error:
-            LOG.warning("Delivery failed for %s: %s", row["key"], str(error)[:250])
+            success = False
+            LOG.warning("Delivery failed for %s: %s", row["key"], type(error).__name__)
+    if success:
+        retire_versions()
+    return success
 
 
 def remove_offline(source_entry):
@@ -414,15 +580,14 @@ def remove_offline(source_entry):
 
 
 def sync_source(url, settings):
-    """Index a bounded batch with source-specific naming, placement and quality."""
+    """Refresh a bounded batch, retaining cached items outside a capped listing window."""
+    entries = list(providers.enumerate_source(url, limit=settings["max_items"]))
     count = 0
-    creators = set()
-    for webpage, context, entry in providers.enumerate_source(
-        url,
-        limit=settings["max_items"],
-    ):
+    complete = bool(entries)
+    seen = set()
+    for webpage, context, entry in entries:
         if STOP.is_set():
-            return
+            return False
         source = providers.provider(
             entry.get("ie_key") or entry.get("extractor_key") or context["provider"]
         )
@@ -432,25 +597,60 @@ def sync_source(url, settings):
             failure = con.execute(
                 "SELECT checked FROM failures WHERE url=?", (webpage,)
             ).fetchone()
-        if old and old["status"] == "published":
+        seen.add(key)
+        if old:
             previous = json.loads(old["metadata"])
             updated = providers.apply_settings(previous, settings)
-            needs_extract = "source_kind" not in previous or previous.get(
-                "max_height", CFG["max_height"]
-            ) != settings.get("max_height", CFG["max_height"])
-            if not needs_extract and updated != previous:
+            if not previous.get("native_display"):
+                updated["legacy_display"] = previous.get("legacy_display", previous)
+            if (
+                previous.get("kind"),
+                previous.get("season"),
+                previous.get("creator_id"),
+                previous.get("library_name"),
+            ) != (
+                updated.get("kind"),
+                updated.get("season"),
+                updated.get("creator_id"),
+                updated.get("library_name"),
+            ):
+                updated["episode"] = 0
+            if updated != previous:
                 with db() as con:
                     con.execute(
                         "UPDATE items SET metadata=?,status='ready' WHERE key=?",
-                        (json.dumps(updated), old["key"]),
+                        (json.dumps(updated), key),
                     )
-                creators.add(updated["creator_id"])
+                reorder(updated["creator_id"])
+            with db() as con:
+                con.execute(
+                    "INSERT OR IGNORE INTO item_sources VALUES(?,?)", (url, key)
+                )
+            due = (
+                time.time() - previous.get("checked", 0)
+                >= settings.get("refresh_hours", 24) * 3600
+            )
+            needs_extract = (
+                due
+                or previous.get("max_height", CFG["max_height"])
+                != settings.get("max_height", CFG["max_height"])
+                or previous.get("probe", "headers") != settings.get("probe", "headers")
+                or old["status"] in ("error", "probing")
+            )
             if not needs_extract:
                 continue
-        if failure and time.time() - failure[0] < 86400 and not entry.get("is_live"):
+        if (
+            failure
+            and not old
+            and time.time() - failure[0] < 86400
+            and not entry.get("is_live")
+        ):
+            complete = False
             continue
         if count >= settings.get("batch_size", CFG["batch_size"]):
-            break
+            # Cached items are still valid; unindexed items mean this is not a full scan.
+            complete = complete and old is not None
+            continue
         count += 1
         try:
             info = providers.extract(webpage)
@@ -458,8 +658,6 @@ def sync_source(url, settings):
                 providers.normalize(info, context), settings, context
             )
             if settings.get("type") == "live" and not item["is_live"]:
-                # A live endpoint returning its finished recording is not a new
-                # collection episode. Preserve ordinary VOD sources independently.
                 remove_offline(url)
                 continue
             if (
@@ -471,38 +669,146 @@ def sync_source(url, settings):
             if info.get("live_status") in ("is_upcoming", "post_live") or (
                 info.get("extractor_key") == "TwitchVod" and info.get("is_live")
             ):
+                complete = False
                 continue
             plan = playback.choose(info, settings.get("max_height", CFG["max_height"]))
-            playback.inspect_layout(plan)
+            if settings.get("probe", "headers") == "headers":
+                playback.inspect_layout(plan)
             save_item(item, plan, url)
-            creators.add(item["creator_id"])
+            seen.add(item["key"])
+            with db() as con:
+                con.execute("DELETE FROM failures WHERE url=?", (webpage,))
         except providers.Unavailable:
             remove_offline(url)
         except Exception as error:
-            LOG.warning("Cannot index %s (%s): %s", source, webpage, str(error)[:200])
+            complete = False
+            LOG.warning("Cannot index %s: %s", source, type(error).__name__)
             with db() as con:
                 con.execute(
                     "INSERT OR REPLACE INTO failures VALUES(?,?,?)",
                     (webpage, time.time(), type(error).__name__),
                 )
-    for creator in creators:
-        reorder(creator)
+    # Only a complete, uncapped listing can prove that an old upload disappeared.
+    # An empty result is deliberately not taken as authority to remove everything.
+    if (
+        complete
+        and entries
+        and (not settings["max_items"] or len(entries) < settings["max_items"])
+    ):
+        with db() as con:
+            old_keys = [
+                r[0]
+                for r in con.execute(
+                    "SELECT key FROM item_sources WHERE source=?", (url,)
+                )
+            ]
+            con.executemany(
+                "DELETE FROM item_sources WHERE source=? AND key=?",
+                [(url, key) for key in old_keys if key not in seen],
+            )
+    return complete
+
+
+def reconcile_sources(active):
+    """Prune only after every configured source was listed successfully this round."""
+    with db() as con:
+        sources = [
+            r[0] for r in con.execute("SELECT DISTINCT source FROM item_sources")
+        ]
+        con.executemany(
+            "DELETE FROM item_sources WHERE source=?",
+            [(url,) for url in sources if url not in active],
+        )
+        unused = list(
+            con.execute(
+                "SELECT key,feed_id FROM items WHERE key NOT IN (SELECT key FROM item_sources)"
+            )
+        )
+        con.executemany(
+            "INSERT OR IGNORE INTO retired_versions VALUES(?)",
+            [(row["feed_id"],) for row in unused],
+        )
+        con.executemany(
+            "DELETE FROM items WHERE key=?", [(row["key"],) for row in unused]
+        )
+
+
+def snapshot():
+    """Send complete cached inventory in chunks; restart a lost session at part zero."""
+    rows = catalog_rows()
+    if any(row["status"] != "published" for row in rows):
+        return False
+    items = [feed_item(row) for row in rows]
+    for attempt in range(2):
+        session = str(time.time_ns())
+        chunks = [items[n : n + 200] for n in range(0, len(items), 200)] or [[]]
+        try:
+            for part, chunk in enumerate(chunks):
+                result = rex(
+                    "PUT",
+                    "/rex/feed/" + CFG["source"] + "/snapshot",
+                    {
+                        "session": session,
+                        "part": part,
+                        "complete": part == len(chunks) - 1,
+                        "items": chunk,
+                    },
+                )
+                if result.get("rejected") or result.get("held"):
+                    raise ValueError("Rex refused snapshot metadata")
+            state("last_snapshot", time.time())
+            return True
+        except requests.HTTPError as error:
+            response = error.response
+            if (
+                attempt == 0
+                and response is not None
+                and response.status_code == 409
+                and "no such snapshot session" in response.text.lower()
+            ):
+                continue
+            # Never bypass the server's shrink guard with force.
+            raise
 
 
 def sync():
-    """Poll enabled YAML sources and their explicitly enabled live targets."""
+    """Refresh metadata, reconcile ownership and publish only complete snapshots."""
     setup_rex()
-    flush_ready()
+    complete = flush_ready()
+    active = set()
     for entry in config.source_entries(CFG):
         for target in providers.configured_targets(entry):
             url = target["url"]
+            active.add(url)
+            # Persist per-source schedules across restarts; failed/partial rounds retry.
+            interval = target["options"].get("interval_seconds", 0)
+            last_poll = float(state("source_poll:" + url) or 0)
+            if interval and time.time() - last_poll < interval:
+                continue
             try:
-                sync_source(url, target["options"])
+                source_complete = sync_source(url, target["options"])
+                if source_complete:
+                    state("source_poll:" + url, time.time())
+                complete = source_complete and complete
             except providers.Unavailable:
                 remove_offline(url)
             except Exception as error:
-                LOG.warning("Source check failed (%s): %s", url, str(error)[:200])
-    flush_ready()
+                complete = False
+                LOG.warning("Source check failed: %s", type(error).__name__)
+    if complete:
+        reconcile_sources(active)
+    complete = flush_ready() and complete
+    # Partial rounds may add known memberships, never remove them.
+    try:
+        rex_collections.reconcile(catalog_rows(), rex, db, prune=complete)
+    except Exception as error:
+        LOG.warning("Collection reconciliation failed: %s", type(error).__name__)
+    if complete:
+        if (
+            time.time() - float(state("last_snapshot") or 0)
+            >= CFG.get("snapshot_hours", 6) * 3600
+        ):
+            snapshot()
 
 
 def resolve(key, force=False):
@@ -520,7 +826,27 @@ def resolve(key, force=False):
             raise KeyError("Unknown media item")
         item = json.loads(row[0])
         info = providers.extract(item["url"])
-        plan = playback.choose(info, item.get("max_height", CFG["max_height"]))
+        try:
+            plan = playback.choose_pinned(
+                info, item.get("max_height", CFG["max_height"]), item.get("selection")
+            )
+            if playback.delivery_changed(
+                item,
+                {
+                    "delivery": plan["kind"],
+                    "media_info": playback.media_info(plan),
+                    "selection": playback.selection(plan),
+                },
+            ):
+                raise ValueError("Published media layout changed")
+        except ValueError:
+            # Refuse mismatched bytes now; the next poll publishes a new feed version.
+            with db() as con:
+                item["checked"] = 0
+                con.execute(
+                    "UPDATE items SET metadata=? WHERE key=?", (json.dumps(item), key)
+                )
+            raise
         with LOCK:
             FORMATS[key] = (time.time(), plan)
         return plan

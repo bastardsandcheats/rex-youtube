@@ -23,7 +23,7 @@ Edit the private YAML: set `rex.url`, the relay listener and the sites/channels/
 
 The [commented YAML example](config/config.example.yml) and [settings guide](docs/SETTINGS.md) cover per-site show/movie/live library names, source name/type overrides, year-based or fixed seasons, item/batch limits, quality and optional channel live checks. `type` defaults to `auto`, so omit it unless you want an override. Comments are preserved because the service does not rewrite settings.
 
-Collections normally become creator shows, publication years become seasons and uploads are ordered oldest-to-newest. Single videos become movies. Live sources share **Live Streams** unless you override a site's live library. Titles, summaries and artwork come from the source. Public creator bios/avatars and missing Vimeo dates are filled when available; missing descriptions are not invented.
+Channel listings normally become creator shows with publication years as seasons. Initial numbering follows upload dates; later backfills append without changing existing episode numbers. Single videos become movies. Live sources share **Live Streams** unless you override a site's live library. Titles, summaries and artwork come from the source through Rex feed `display`, respecting user edits. Public creator bios/avatars and missing Vimeo dates are filled when available; missing descriptions are not invented.
 
 ```sh
 systemctl restart rex-youtube
@@ -31,6 +31,16 @@ journalctl -u rex-youtube -f
 ```
 
 Logs default to INFO and rotate automatically. `/health` reports availability. Private settings, the small `data/metadata.db`, logs and virtual environments stay out of Git. The service keeps no persistent video cache. This is a copy-and-hack example with one YAML settings format and one current metadata schema.
+
+## Collections and optional probing
+
+Keep a channel as a show and set `collection: Level1Techs` on several related channels to group their shows. Or use `type: collection` to expose a channel's uploads as individual movies in a channel-named collection. `collection_type: show` is also supported. Collections are scoped to a library/type, as in PlexControl. Live streams are grouped into site-named collections by default; set `live_collection: false` or give it a custom name.
+
+Each site/source can set `probe: true` for complete ffprobe metadata, `probe: false` to use extractor metadata without probing, or `probe: headers` (the existing lightweight default). Accurate stream information still matters: disabling probing trades verification for less network work. No media cache is created.
+
+New keys are optional; existing YAML remains valid. [Settings and examples](docs/SETTINGS.md#rex-collections) explain grouping, per-site probing and metadata refresh. Titles/artwork refresh in bounded batches (default 24 hours), and complete cached snapshots reconcile Rex every six hours after successful scans.
+
+Set `max_items: 0` to discover all uploads and `interval_seconds: 86400` at site level for daily polling. Initial indexing remains bounded by `batch_size`; unfinished rounds retry at the worker interval. Listings are re-read, while cached uploads skip extraction until refresh is due. Override live sources separately if they need more frequent checks.
 
 ## Check a URL or all providers
 
@@ -53,13 +63,13 @@ You can also ask the running service with `POST /api/providers/check` and list p
 
 ## Playback and Rex compatibility
 
-Last tested against upstream Rex **`306f4aa992700f6a3df5eabd5eca731d24dbedf5`**, without the manifest MIME patch. Fast checks passed for YouTube and Dailymotion HLS, separate-track DASH, and TikTok progressive video. HLS/DASH passed Rex conversion, direct Part decoding and short seek requests. The MIME patch is no longer included or required for these checked paths.
+Latest feed-display/collection integration was checked against upstream Rex **`9671faa2dda20abff12a37885ab2dc0b4bcffccb`**, without a MIME patch. The earlier fast playback baseline used `306f4aa992700f6a3df5eabd5eca731d24dbedf5`. Fast checks passed for YouTube and Dailymotion HLS, separate-track DASH, and TikTok progressive video. HLS/DASH passed Rex conversion, direct Part decoding and short seek requests. The MIME patch is no longer included or required for these checked paths.
 
 Rex now redirects direct HLS Part reads into its playback conversion and accepts `.m3u8` feed filenames with an HLS probe. The existing demo was recorded on the earlier patched revision; see [tested revisions and limits](docs/TEST_FINDINGS.md). These fast checks do not replace a full Plex Web/Plezy walkthrough or long-running live playback tests.
 
-The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information. Separate-track manifests have a controlled track order and need no probe. Muxed HLS does not declare its track indices, so those items get a small ffprobe header check before publishing; guessing the order breaks browser playback. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
+The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information. Separate-track manifests have a controlled track order. In the default `probe: headers` mode, muxed HLS gets a small ffprobe header check before publishing; guessing the order breaks browser playback. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
 
-This example still uses a logical `.mp4` **file** label while **path** points to the actual manifest. This does not create an MP4 or invent a file size. Current Rex also accepts `.m3u8` labels when the probe identifies HLS. Plex Web uses Rex's DASH transcoder; direct HLS Part reads now follow Rex's upstream conversion redirect.
+HLS uses its actual `.m3u8` label. DASH uses a logical `.mp4` **file** label while **path** points to the actual manifest. This does not create an MP4 or invent a file size. Current Rex also accepts `.m3u8` labels when the probe identifies HLS. Plex Web uses Rex's DASH transcoder; direct HLS Part reads now follow Rex's upstream conversion redirect.
 
 | Media | Behavior and limits |
 | --- | --- |

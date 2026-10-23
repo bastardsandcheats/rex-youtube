@@ -17,6 +17,7 @@ def info(extractor="Youtube", ident="123"):
             {
                 "url": "https://cdn.example/movie.mp4?signature=transient-fixture",
                 "protocol": "https",
+                "filesize": 123456,
                 "ext": "mp4",
                 "vcodec": "avc1.640028",
                 "acodec": "mp4a.40.2",

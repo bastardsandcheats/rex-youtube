@@ -16,9 +16,15 @@ DEFAULT_OPTIONS = {
     "year_seasons": True,
     "season": 1,
     "max_items": 1000,
+    "interval_seconds": 0,
     "check_live": False,
     "max_height": 1080,
     "batch_size": 5,
+    "probe": "headers",
+    "refresh_hours": 24,
+    "collection": False,
+    "collection_type": "movie",
+    "live_collection": True,
 }
 ENTRY_KEYS = set(DEFAULT_OPTIONS) | {"url", "name", "enabled"}
 SITE_KEYS = set(DEFAULT_OPTIONS) | {
@@ -104,13 +110,27 @@ def integer(value, label, minimum, maximum):
 
 def options(values, label):
     """Validate inherited source options once, keeping typos out of the scanner."""
-    if values["type"] not in ("auto", "show", "movie", "live"):
-        raise ValueError(label + ".type must be auto, show, movie or live")
+    if values["type"] not in ("auto", "show", "movie", "live", "collection"):
+        raise ValueError(label + ".type must be auto, show, movie, live or collection")
+    if not isinstance(values["probe"], bool) and values["probe"] != "headers":
+        raise ValueError(label + ".probe must be true, false or headers")
+    if values["collection_type"] not in ("movie", "show"):
+        raise ValueError(label + ".collection_type must be movie or show")
+    for field in ("collection", "live_collection"):
+        value = values[field]
+        if not isinstance(value, bool) and (
+            not isinstance(value, str) or not value.strip() or len(value) > 500
+        ):
+            raise ValueError(
+                label + "." + field + " must be true, false or a collection name"
+            )
     for field in ("year_seasons", "check_live"):
         boolean(values[field], label + "." + field)
     for field, low, high in [
+        ("refresh_hours", 1, 8760),
         ("season", 0, 9999),
-        ("max_items", 1, 100000),
+        ("max_items", 0, 100000),
+        ("interval_seconds", 0, 86400),
         ("max_height", 144, 4320),
         ("batch_size", 1, 1000),
     ]:
@@ -132,7 +152,9 @@ def normalize(document):
     )
     rex = mapping(document.get("rex"), "rex", {"url", "token", "source_id"})
     scan = mapping(
-        document.get("scan"), "scan", {"interval_seconds", "batch_size", "max_items"}
+        document.get("scan"),
+        "scan",
+        {"interval_seconds", "batch_size", "max_items", "snapshot_hours"},
     )
     playback = mapping(
         document.get("playback"), "playback", {"max_height", "live_buffer_mb"}
@@ -158,9 +180,12 @@ def normalize(document):
         "interval_seconds": integer(
             scan.get("interval_seconds", 900), "scan.interval_seconds", 1, 86400
         ),
+        "snapshot_hours": integer(
+            scan.get("snapshot_hours", 6), "scan.snapshot_hours", 1, 8760
+        ),
         "batch_size": integer(scan.get("batch_size", 5), "scan.batch_size", 1, 1000),
         "collection_limit": integer(
-            scan.get("max_items", 1000), "scan.max_items", 1, 100000
+            scan.get("max_items", 1000), "scan.max_items", 0, 100000
         ),
         "max_height": integer(
             playback.get("max_height", 1080), "playback.max_height", 144, 4320
