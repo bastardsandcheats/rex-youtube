@@ -81,6 +81,8 @@ The recovery probe delivered all 60 video frames across an injected 18-second ou
 
 ## Verification
 
+See [consolidated test findings](docs/TEST_FINDINGS.md) for the verified results, fixes, failed checks and remaining limitations.
+
 Real media-path checks use public technology/science content and official Blender samples. They resolve a source, ffprobe its relay, feed an isolated temporary Rex catalog and decode video **and audio** through Rex. They never modify a user's libraries. External sites can change or restrict access by IP.
 
 | Source | Backend | Verified on this host |
