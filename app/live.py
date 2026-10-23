@@ -9,14 +9,14 @@ import time
 
 # Both libraries wrap urllib3 URL normalization. Load yt-dlp first so the
 # Streamlink wrapper delegates regex methods instead of hiding them.
-from providers import Unavailable
+from app.source import Unavailable
 
 import streamlink
 from streamlink.stream.hls import HLSStream
 from streamlink.stream.http import HTTPStream
 from streamlink.stream.ffmpegmux import MuxedStream
 
-import playback
+from app import playback
 
 LOG = logging.getLogger("rex-youtube")
 # Third-party transport errors can include signed URLs; our recovery logs omit them.
@@ -28,6 +28,7 @@ LIMIT = threading.BoundedSemaphore(4)
 
 
 def open_reader(plan, buffer_mb):
+    """Open bounded Streamlink readers, combining separate tracks through FIFO pipes."""
     session = streamlink.Streamlink()
     # Separate live renditions share the same read-ahead budget. Streamlink's
     # muxer uses FIFO pipes, never regular media files, to combine their bytes.

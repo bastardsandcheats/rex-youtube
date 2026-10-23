@@ -1,120 +1,91 @@
-# Adding a yt-dlp provider
+# Add a provider: grab, test and hack
 
-This guide is for **rex-youtube**. Most sites supported by yt-dlp can use the existing extraction, metadata and relay code. Start with a public video URL; add special handling only if testing reveals something the shared code cannot handle.
-
-Run the commands below from your rex-youtube installation directory. ExampleSite names and `videos.example` URLs are placeholders—replace them with the actual provider and public URLs.
-
-## 1. Try adding the URL
-
-Add a public channel, playlist or video to `config/sources.txt`:
-
-```text
-https://videos.example/channels/maker | Maker Lab
-```
-
-The optional text after `|` overrides the creator/show name. Then restart:
+Start with a URL. You do not need to add code or edit settings just to find out whether a site works:
 
 ```sh
-systemctl restart rex-youtube
+venv/bin/python scripts/check_providers.py 'https://videos.example/watch/123'
 ```
 
-If you run the Python process directly, stop and start it instead. The next scan extracts the URL and creates the appropriate Rex library automatically:
+Use the real public URL instead of the placeholder. The checker exercises extraction, metadata, the actual HTTP relay, decoded playback and seeking without Rex. Read the individual results: metadata extraction alone is not proof of playable media.
 
-| URL extracted as | Result in Rex |
-| --- | --- |
-| Channel or playlist | Creator show in the provider library; years become seasons and uploads become episodes |
-| Single video | Movie in the provider’s Videos library |
-| Live broadcast | Temporary movie in the shared Live Streams library |
+## Standard yt-dlp provider: one small file
 
-The extractor must expose a channel/playlist as a collection for it to become a show. A display-name override alone does not turn a single video into a collection. Missing publication dates use season 0.
-
-Existing defaults backfill five entries per poll, every 15 minutes. A partially populated channel may simply be waiting for another batch.
-
-## 2. Check the extractor identity
-
-If the site needs a clearer library name or channel/video extractors are ending up under different providers, inspect a representative video:
-
-```sh
-venv/bin/python - 'https://videos.example/watch/123' <<'PY'
-import sys
-import providers
-
-info = providers.extract(sys.argv[1])
-print("Extractor:", info.get("extractor_key") or info.get("extractor"))
-print("Provider:", providers.provider(info.get("extractor_key") or info.get("extractor")))
-print("Title:", info.get("title"))
-print("Creator:", info.get("channel") or info.get("uploader"))
-PY
-```
-
-This extracts metadata without downloading a media file. It prints selected fields, rather than dumping signed playback URLs or temporary cookies.
-
-In `providers.py`, add an entry to `SOURCES` if needed:
+If the site already returns usable yt-dlp output, create `providers/examplesite.py`:
 
 ```python
-SOURCES = {
-    # Existing entries stay here.
-    "examplesite": "Example Site",
-}
+"""Example Site uses standard yt-dlp extraction and the shared relay.
+
+No custom extraction, metadata or playback handlers are required.
+"""
+
+NAME = "Example Site"
+TEST_URLS = [
+    {"kind": "video", "url": "https://videos.example/watch/123"},
+    {"kind": "collection", "url": "https://videos.example/channels/maker"},
+]
 ```
 
-The key is a lowercase **extractor-name prefix**, not a hostname. An `examplesite` entry groups names such as `ExampleSite` and `ExampleSiteChannel` under one provider. The value supplies the readable library name. Unknown extractor identities already have a fallback, so this entry is unnecessary when the existing name and grouping are suitable.
+Those URLs are placeholders too. Choose stable public test URLs containing the content you intend to support. The filename supplies the provider key and extractor-name prefix: `examplesite.py` groups extractor names beginning with `ExampleSite`. Optional `KEY` and `PREFIXES` declarations handle different extractor naming; see the [contract](PROVIDER_CONTRACT.md).
 
-Choose the key before populating a production library: it becomes part of persistent feed IDs. Renaming it later can create duplicate identities. If the extractor names do not share a suitable prefix, add a narrow explicit mapping in `provider()` rather than a hostname-based routing system.
-
-## 3. Prove playback
-
-A successful title lookup does not prove that Rex or a player can read the media.
-
-In `scripts/probe_sites.py`, add a stable, public video to `EXAMPLES`:
-
-```python
-EXAMPLES = {
-    # Existing entries stay here.
-    "examplesite": "https://videos.example/watch/123",
-}
-```
-
-For channel support, also add its collection URL to `COLLECTIONS` using the same key. Then run:
+**That is the whole provider file for a standard site.** Every non-`__` Python file in `providers/` is discovered automatically, including by the test suite. The folder contains no registry or framework modules. Missing/invalid declarations become reported definition failures instead of hiding other sites.
 
 ```sh
-# Resolve and decode the relay; compare its tracks with the feed metadata.
-venv/bin/python scripts/probe_sites.py --site examplesite
-
-# Also publish into a disposable Rex instance and decode through Rex.
-venv/bin/python scripts/probe_sites.py --site examplesite --rex-bin /path/to/rex-server
-
-# Check creator/show, year/season and episode placement too.
-venv/bin/python scripts/probe_sites.py --site examplesite --collections --rex-bin /path/to/rex-server
+venv/bin/python scripts/check_providers.py --provider examplesite
+venv/bin/python scripts/check_providers.py --all
 ```
 
-Add the dictionary entries **before** running these commands: an unknown `--site` name selects no examples. A real run should print a JSON result for the provider with `"result": "passed"`. The current probe requires both video and audio; a silent camera needs a deliberately adapted check.
+These commands get their URLs from the provider files. Do not copy another test URL list into a script or offline unit test. Add a live fixture with `kind: "live"` when appropriate; use `--include-live` to attempt volatile broadcasts. Experimental cases can declare `experimental: True` and are attempted with `--include-experimental`.
 
-The Rex checks use a temporary catalog, not your running libraries. Use a Rex executable with the playback capabilities/patch described in the main README. Finally, try the installed service in your actual client: check playback beyond the intro, duration, seeking, episode ordering and thumbnails. Native-client and Plex Web results can differ.
+## Add the actual channel/item to YAML
 
-## 4. Add a small special case only when necessary
+The provider file holds reusable tests. Your private YAML holds the channels/items you want in Rex:
 
-The shared code already handles formats, headers, metadata, HLS/DASH relaying and library creation. Inspect these files when a check fails:
+```yaml
+sites:
+  examplesite:
+    library: Workshops
+    movie_library: Workshop Films
+    sources:
+      - url: https://videos.example/channels/my-channel
+        type: show
+        name: My Workshop
+        year_seasons: false
+        season: 1
+        max_items: 20
+      - url: https://videos.example/watch/my-film
+        type: movie
+```
 
-| File | What belongs there |
-| --- | --- |
-| `providers.py` | Extractor identity, collection URLs, missing provider metadata or public embed handling |
-| `playback.py` | Format selection, codec/track metadata and manifest generation |
-| `live.py` | Bounded live buffering and reconnection |
-| `service.py` | Shared persistence, Rex publication and HTTP serving |
-
-For example, Vimeo uses a public embed endpoint and oEmbed dates, while Twitch collections explicitly select archived VODs. Keep comparable exceptions close to extraction and leave the shared publisher unchanged where possible. Use metadata the source actually supplies; do not guess an ID, episode number or codec to make a failed test pass.
-
-Add an offline regression test in `tests/test_sources.py` or the relevant existing test file for any new behavior. Mock provider requests; keep live websites in the opt-in network probes. Run:
+Omit `type` to use the default `auto`. Restart the service after changing YAML or adding a site file. Check your actual selection independently of the reusable fixtures:
 
 ```sh
-venv/bin/black --check service.py providers.py playback.py live.py scripts tests
-venv/bin/ruff check service.py providers.py playback.py live.py scripts tests
+venv/bin/python scripts/check_providers.py --configured
+```
+
+See [settings](SETTINGS.md) for inheritance, live checks, library overrides and the remaining options. You do not have to maintain a YAML test list as well: tests live once in the provider file, and `--configured` reads the actual YAML entries.
+
+## When a custom handler is needed
+
+Keep the exception in that site's file. The [generated inventory](../reports/PROVIDERS.md) shows exactly which existing sites use custom handlers and why. For example:
+
+- **YouTube:** standard yt-dlp video extraction; only channel/live URL selection and ID-to-URL helpers are custom.
+- **Vimeo:** public embedded-player selection, missing upload-date enrichment and optional public creator metadata.
+- **Twitch:** Streamlink live extraction, archived-VOD URL selection and public creator metadata.
+- **A provider without hooks:** standard yt-dlp extraction, normalization and relaying throughout.
+
+The optional hook signatures and minimum raw output are in [PROVIDER_CONTRACT.md](PROVIDER_CONTRACT.md). Give each hook a docstring explaining the site-specific reason it exists; discovery validates that documentation. Keep format/manifest handling in `app/playback.py` and live buffering in `app/live.py` when it is shared across sites.
+
+Do not guess a codec, ID, title, season or episode number to make a test pass. If a site omits metadata or anonymous access is blocked, the report should say so. This example uses public anonymous media; account/private/DRM workflows are outside its current implementation.
+
+## Check and document the change
+
+```sh
+venv/bin/black --check service.py app providers scripts tests
+venv/bin/ruff check service.py app providers scripts tests
 venv/bin/python -m unittest discover -s tests
+venv/bin/python scripts/check_providers.py --provider examplesite
 ```
 
-## 5. Document and share the example
+The offline suite tests shared contracts, configuration, HTTP behavior and discovery without contacting websites. It also validates each discovered provider file. Network checks use that file's URLs and automatically generate Markdown/JSON reports. Add a focused offline regression for custom behavior; ordinary new-provider files need no central registration or duplicated fixture dictionary.
 
-Add a verified public URL to `config/sources.example.txt` and record the provider’s tested behavior and limitations in the README. Update `docs/TEST_FINDINGS.md` when the results change. Keep active config, tokens, browser state, logs and diagnostic recordings out of Git.
-
-This example supports anonymous public media. A yt-dlp extractor existing for a site does not guarantee anonymous access, a compatible codec, seekable playback or working live streams. Login-only and DRM content remain outside this adapter’s scope. See [the current findings](TEST_FINDINGS.md) before treating a limitation as a new-provider bug.
+Read [the architecture diagrams](ARCHITECTURE.md), [checking/report guide](CHECKING_PROVIDERS.md) and [current findings](TEST_FINDINGS.md). A few seconds of FFmpeg decoding does not establish full-length or client compatibility: try duration, seeking and playback beyond intros in your intended client before claiming those work. Add a verified public configuration example when useful, and keep real settings, tokens and run reports out of Git.

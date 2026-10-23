@@ -1,2 +1,0 @@
-# Legacy filename; new installs can use sources.txt instead.
-https://www.youtube.com/@TechnologyConnections

@@ -7,52 +7,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 import requests
-import playback
-import providers
-import service as s
+from app import playback
+from app import source as providers
+from app import service as s
 
 
-def info(extractor="Youtube", ident="123"):
-    return {
-        "id": ident,
-        "extractor_key": extractor,
-        "webpage_url": "https://videos.example/watch/" + ident,
-        "title": "Open-source electronics workshop",
-        "description": "A public maker lesson.",
-        "channel_id": "maker",
-        "channel": "Maker Lab",
-        "upload_date": "20260102",
-        "duration": 120,
-        "thumbnail": "https://images.example/thumb.jpg",
-        "formats": [
-            {
-                "url": "https://cdn.example/movie.mp4?signature=transient-fixture",
-                "protocol": "https",
-                "ext": "mp4",
-                "vcodec": "avc1.640028",
-                "acodec": "mp4a.40.2",
-                "width": 1920,
-                "height": 1080,
-                "asr": 48000,
-            }
-        ],
-    }
+from fixtures import info
+from app.provider_registry import get_definition, test_cases
 
 
-class SourceTests(unittest.TestCase):
+def site_url(provider, kind):
+    return next(
+        case["url"]
+        for case in get_definition(provider).TEST_URLS
+        if case["kind"] == kind
+    )
+
+
+class SourceContractTests(unittest.TestCase):
     def test_detection_uses_extractors_for_supported_sites(self):
-        examples = {
-            "youtube": "https://www.youtube.com/@TechnologyConnections",
-            "vimeo": "https://vimeo.com/1084537",
-            "dailymotion": "https://www.dailymotion.com/video/x7bs2wf",
-            "twitch": "https://www.twitch.tv/codinggarden",
-            "peertube": "https://framatube.org/videos/watch/9c9de5e8-0a1e-484a-b099-e80766180a6d",
-            "bilibili": "https://www.bilibili.com/video/BV15z4y1F7tK/",
-            "tiktok": "https://www.tiktok.com/@astrosamantha/video/7166258449645407493",
-        }
-        for expected, url in examples.items():
-            with self.subTest(expected):
-                self.assertEqual(providers.detect(url), expected)
+        for case in test_cases(include_live=True, include_experimental=True):
+            with self.subTest(provider=case["provider"], kind=case["kind"]):
+                self.assertEqual(providers.detect(case["url"]), case["provider"])
 
     def test_each_site_has_the_same_normalized_shape(self):
         expected = set(providers.normalize(info()))
@@ -95,17 +71,18 @@ class SourceTests(unittest.TestCase):
             "extractor_key": "VimeoUser",
             "title": "Maker Lab",
             "entries": [
-                {"id": "1", "url": "https://vimeo.com/1"},
-                {"id": "2", "url": "https://vimeo.com/2"},
+                {"id": "1", "url": "https://videos.example/1"},
+                {"id": "2", "url": "https://videos.example/2"},
             ],
         }
         with (
             patch.object(providers, "extract", return_value=collection),
             patch.object(providers, "creator_metadata", return_value={}),
         ):
-            entries = list(providers.enumerate_source("https://vimeo.com/maker"))
+            entries = list(providers.enumerate_source(site_url("vimeo", "collection")))
         self.assertEqual(
-            {r[0] for r in entries}, {"https://vimeo.com/1", "https://vimeo.com/2"}
+            {r[0] for r in entries},
+            {"https://videos.example/1", "https://videos.example/2"},
         )
         self.assertTrue(all(r[1]["collection"] for r in entries))
 
@@ -171,9 +148,14 @@ class SourceTests(unittest.TestCase):
             patch.object(s, "setup_rex"),
             patch.object(s, "flush_ready"),
             patch.object(
-                providers,
-                "source_lines",
-                return_value=[("https://www.twitch.tv/codinggarden", "")],
+                s.config,
+                "source_entries",
+                return_value=[
+                    {
+                        "url": site_url("twitch", "live"),
+                        "options": {"name": "", "check_live": None},
+                    }
+                ],
             ),
             patch.object(s, "sync_source", side_effect=requests.Timeout),
             patch.object(s, "remove_offline") as remove,
@@ -230,16 +212,6 @@ class SourceTests(unittest.TestCase):
         self.assertFalse(providers.normalize(video)["is_live"])
         self.assertNotEqual(playback.choose(video)["kind"], "live")
 
-    def test_malformed_source_does_not_hide_following_sources(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "sources.txt"
-            path.write_text("not-a-url\nhttps://vimeo.com/1084537\n")
-            with self.assertLogs("providers", level="WARNING"):
-                self.assertEqual(
-                    list(providers.source_lines(path)),
-                    [("https://vimeo.com/1084537", "")],
-                )
-
     def test_dash_manifest_advertises_profile_for_ffmpeg_autodetection(self):
         video = info()
         video["formats"][0].update(
@@ -253,45 +225,6 @@ class SourceTests(unittest.TestCase):
         text = playback.dash_manifest(playback.choose(video), lambda u, h, e: u)
         self.assertIn("urn:mpeg:dash:profile:isoff-main:2011", text)
         self.assertIn('sourceURL="https://cdn.example/init.mp4"', text)
-
-    def test_legacy_migration_keeps_feed_identity_and_rex_key(self):
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.object(s, "ROOT", Path(directory)),
-        ):
-            with s.db() as con:
-                con.executescript(
-                    """CREATE TABLE channels(id TEXT,name TEXT,description TEXT,art TEXT);
-                CREATE TABLE videos(id TEXT,channel_id TEXT,title TEXT,description TEXT,published TEXT,
-                duration REAL,episode INTEGER,info TEXT,rating_key TEXT);"""
-                )
-                con.execute(
-                    "INSERT INTO channels VALUES(?,?,?,?)",
-                    ("maker", "Maker Lab", "", ""),
-                )
-                probe = {"media_info": {"streams": [], "format": {"duration": "120"}}}
-                con.execute(
-                    "INSERT INTO videos VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        "abc",
-                        "maker",
-                        "Circuit lab",
-                        "",
-                        "2026-01-02",
-                        120,
-                        3,
-                        json.dumps(probe),
-                        "789",
-                    ),
-                )
-            s.init_db()
-            s.init_db()
-            with s.db() as con:
-                rows = list(con.execute("SELECT * FROM items"))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["feed_id"], "yt-hls2-abc")
-            self.assertEqual(rows[0]["rating_key"], "789")
-            self.assertEqual(json.loads(rows[0]["metadata"])["episode"], 3)
 
     def test_muxed_hls_uses_actual_header_indices(self):
         from types import SimpleNamespace
@@ -329,7 +262,9 @@ class SourceTests(unittest.TestCase):
             video, {"collection": True, "name": "Maker Lab - All Videos sorted by Date"}
         )
         self.assertEqual(item["creator_name"], "Maker Lab")
-        item = providers.normalize(video, {"collection": True, "alias": "My Workshops"})
+        item = providers.apply_settings(
+            providers.normalize(video, {"collection": True}), {"name": "My Workshops"}
+        )
         self.assertEqual(item["creator_name"], "My Workshops")
 
     def test_streamlink_can_resolve_a_non_twitch_live_site(self):
@@ -338,8 +273,14 @@ class SourceTests(unittest.TestCase):
 
         live = info("Example:Streamlink")
         live["is_live"] = True
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.extract_info.side_effect = providers.yt_dlp.utils.DownloadError(
+            "Unsupported URL"
+        )
         with (
             patch.object(providers, "detect", return_value="generic"),
+            patch.object(providers.yt_dlp, "YoutubeDL", return_value=client),
             patch.object(streamlink, "Streamlink", return_value=MagicMock()),
             patch.object(providers, "streamlink_live", return_value=live) as resolve,
         ):
@@ -350,14 +291,15 @@ class SourceTests(unittest.TestCase):
     def test_vimeo_public_oembed_restores_upload_year(self):
         from unittest.mock import MagicMock
 
-        video = info("Vimeo", "54502942")
+        video_url = site_url("vimeo", "video")
+        video = info("Vimeo", video_url.rsplit("/", 1)[-1])
         video.pop("upload_date")
         client = MagicMock()
         client.extract_info.return_value = video
         response = MagicMock()
         response.json.return_value = {
             "upload_date": "2012-11-28 23:09:00",
-            "author_url": "https://vimeo.com/businessofsoftware",
+            "author_url": site_url("vimeo", "collection"),
         }
         with (
             patch.object(providers, "detect", return_value="vimeo"),
@@ -365,25 +307,27 @@ class SourceTests(unittest.TestCase):
             patch.object(providers.requests, "get", return_value=response),
         ):
             factory.return_value.__enter__.return_value = client
-            extracted = providers.extract("https://vimeo.com/54502942")
+            extracted = providers.extract(video_url)
         self.assertEqual(extracted["upload_date"], "20121128")
-        self.assertEqual(extracted["uploader_id"], "businessofsoftware")
+        self.assertEqual(
+            extracted["uploader_id"], site_url("vimeo", "collection").rsplit("/", 1)[-1]
+        )
 
     def test_twitch_channel_defaults_to_archived_vods(self):
         collection = {"id": "maker", "extractor_key": "TwitchVideos", "entries": []}
+        configured = site_url("twitch", "collection")
+        bare = configured.split("?", 1)[0]
         with patch.object(providers, "extract", return_value=collection) as extract:
-            list(providers.enumerate_source("https://www.twitch.tv/csharpfritz/videos"))
+            list(providers.enumerate_source(bare))
         self.assertEqual(
             extract.call_args.args[0],
-            "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
+            configured,
         )
 
     def test_youtube_live_url_is_not_changed_to_a_collection(self):
         with patch.object(providers, "extract", return_value=None) as extract:
-            list(providers.enumerate_source("https://www.youtube.com/@NASA/live"))
-        self.assertEqual(
-            extract.call_args.args[0], "https://www.youtube.com/@NASA/live"
-        )
+            list(providers.enumerate_source(site_url("youtube", "live")))
+        self.assertEqual(extract.call_args.args[0], site_url("youtube", "live"))
 
     def test_publication_sets_year_and_keeps_empty_source_fields_from_erasing_metadata(
         self,

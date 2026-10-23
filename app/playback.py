@@ -1,6 +1,7 @@
 """Small playback plans and HTTP/HLS/DASH manifest rewriting; no media files."""
 
 import re
+from app import source as providers
 import json
 import subprocess
 import xml.etree.ElementTree as ET
@@ -62,9 +63,7 @@ def choose(info, max_height=1080):
     kind = (
         "hls" if "m3u8" in protocol else "dash" if a or "dash" in protocol else "http"
     )
-    live = bool(info.get("is_live")) and not str(
-        info.get("extractor_key", "")
-    ).lower().startswith("twitchvod")
+    live = providers.live_status(info)
     return {
         "kind": "live" if live else kind,
         "video": v,
@@ -122,10 +121,12 @@ def inspect_layout(plan):
 
 
 def codec(value, audio=False):
+    """Map extractor codec spellings to ffprobe/Rex codec names."""
     value = str(value or "")
     for prefix, name in [
         ("avc", "h264"),
         ("hvc", "hevc"),
+        ("h265", "hevc"),
         ("hev", "hevc"),
         ("vp09", "vp9"),
         ("av01", "av1"),
@@ -184,12 +185,14 @@ def media_info(plan):
 
 
 def extension(plan):
+    """Choose the relay suffix for the selected delivery transport."""
     return {"hls": "m3u8", "dash": "mpd", "live": "ts"}.get(
         plan["kind"], "webm" if plan["video"].get("ext") == "webm" else "mp4"
     )
 
 
 def headers(plan, fmt):
+    """Combine request headers without sending Rex credentials upstream."""
     return {**plan.get("headers", {}), **fmt.get("http_headers", {})}
 
 
@@ -206,6 +209,7 @@ def hls_master(plan, relay):
 
 
 def rewrite_hls(text, base, request_headers, relay):
+    """Rewrite playlist references through the bounded in-memory URL map."""
     lines = []
     for line in text.splitlines():
         if line.startswith("#EXT-X-KEY") and "com.apple.streamingkeydelivery" in line:

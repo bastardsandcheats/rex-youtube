@@ -4,7 +4,7 @@ import io
 import unittest
 from unittest.mock import MagicMock, patch
 
-import live
+from app import live
 
 
 class Sink(io.BytesIO):
@@ -84,7 +84,7 @@ class LiveTests(unittest.TestCase):
         self.assertIs(reader, mux.return_value.open.return_value)
 
     def test_offline_confirmation_stops_reconnect(self):
-        from providers import Unavailable
+        from app.source import Unavailable
 
         relay = live.LiveRelay(
             self.plan(), MagicMock(side_effect=Unavailable("offline"))

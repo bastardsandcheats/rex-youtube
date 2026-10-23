@@ -2,17 +2,32 @@
 
 Consolidated on 23 October 2026. These are observations from the completed checks, not guarantees about every upload, client or future provider change. Temporary raw logs, browser state, recordings and diagnostic scripts were removed after this summary was written. Repeatable checks remain in `tests/` and `scripts/`; the final edited recording remains in `demo/`.
 
+## Provider/settings refactor verification
+
+The service now has one YAML settings format, shared code in `app/`, and site-only files in `providers/`. The registry and framework are outside the site folder. Reusable network URLs live in each provider's `TEST_URLS`; the renamed `test_source_contract.py` tests shared behavior offline and obtains real-site URL examples from those declarations.
+
+- **80 offline tests passed**, including discovery of a dropped-in provider file, invalid definitions, YAML inheritance/comments/validation, live-target expansion, fixed-season feed placement, private worker isolation, HTTP checks, early-EOF detection, report replacement and actual RAM-fixture relay decoding without Rex.
+- The automatic provider suite attempted **16 cases** including live/experimental fixtures: **7 passed, 7 partial, 1 failed, 1 unavailable**. **14 decoded video successfully.** Bilibili failed anonymous extraction and the Twitch live fixture was offline. Missing descriptions/artwork produced partial metadata results; PeerTube and Vimeo seek samples failed independently of their successful initial decoding.
+- The configured-source run sampled **20 enabled URLs: 9 passed and 11 partial**. **18 decoded successfully.** One YouTube extraction failed and one Dailymotion relay check failed. The remaining partial results describe seeking or missing source metadata. A configured collection is sampled, not exhaustively scanned by this checker.
+- A real HTTP `POST /api/providers/check` returned a successful extraction/metadata/relay/decode/seek report. It used the isolated checker, without publishing to Rex.
+- `--all` and `--configured` automatically maintain separate Markdown/JSON run reports. `PROVIDERS.md` is generated from actual site declarations, docstrings and handlers. Run reports replace their previous canonical files and are ignored by Git.
+- Checking exposed a generic-DASH routing mistake: a Streamlink plugin claimed a finite MPD without usable stream URLs. Generic manifests now try yt-dlp first; Streamlink is a fallback for unsupported web URLs. A subsequent MPD check decoded video/audio through the relay and reported missing descriptive metadata separately.
+- Extractor codec spelling `h265` is normalized to ffprobe/Rex's `hevc` name. This corrects declared metadata; it does not establish every client's HEVC playback support.
+- Normal reads preserve YAML comments, duplicate/misspelled keys are rejected, and the active configuration's redundant `type: auto` entries were removed without changing its effective settings. The application contains no JSON/URL-list compatibility paths or metadata migration code.
+
+These are bounded sample checks, not an assertion that every upload, full-length video or player works. The generated local `reports/suite.md` and `reports/configured.md` contain the individual stage results; rerun the commands in the checking guide to regenerate them.
+
 ## Tested revisions
 
 - Browser walkthrough: Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc`, with the included manifest MIME patch.
 - Isolated Rust playback and full native-transcode baseline: Rex `a9d5eedc7a7fe39e8b0b1693547d3d9b1300b0c4`, with the same patch. These results were not rerun in full against the later browser revision.
-- The old HLS playback patch was superseded. The example includes only `patches/rex-manifest-mime.patch`.
+- The supplied playback patch is `patches/rex-manifest-mime.patch`.
 
 ## Verified results
 
 | Check | Result |
 | --- | --- |
-| Offline Python tests | 45 passed |
+| Offline Python tests before the provider/settings refactor | 45 passed |
 | Black and Ruff | Passed |
 | Manifest MIME regression test | 1 passed |
 | Upstream Rust universal playback tests | 20 passed; 1 ignored because it needs an explicitly configured FFmpeg executable |

@@ -20,30 +20,24 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import playback
-import providers
-import service as s
+from app import playback
+from app import source as providers
+from app import service as s
 
-# Public educational/product demonstrations and an official Blender render example.
+# Optional Rex-integrated probes share the automatically discovered provider fixtures.
+from app.provider_registry import test_cases
+
 EXAMPLES = {
-    "dash-demo": "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd",
-    "youtube": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
-    "vimeo": "https://vimeo.com/1084537",
-    "dailymotion": "https://www.dailymotion.com/video/x7bs2wf",
-    "peertube": "https://framatube.org/videos/watch/9c9de5e8-0a1e-484a-b099-e80766180a6d",
-    "bilibili": "https://www.bilibili.com/video/BV15z4y1F7tK/",
-    "tiktok": "https://www.tiktok.com/@astrosamantha/video/7166258449645407493",
-    "twitch": "https://www.twitch.tv/videos/2905866465",
+    case["provider"]: case["url"]
+    for case in test_cases(include_experimental=True)
+    if case["kind"] == "video"
 }
-
-
+# A transport fixture is not a site definition and stays outside providers/.
+EXAMPLES["dash-demo"] = "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd"
 COLLECTIONS = {
-    "youtube": "https://www.youtube.com/@TechnologyConnections/videos",
-    "vimeo": "https://vimeo.com/businessofsoftware",
-    "dailymotion": "https://www.dailymotion.com/ComputerHoy",
-    "peertube": "https://framatube.org/c/joinpeertube/videos",
-    "tiktok": "https://www.tiktok.com/@astrosamantha",
-    "twitch": "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
+    case["provider"]: case["url"]
+    for case in test_cases()
+    if case["kind"] == "collection"
 }
 
 

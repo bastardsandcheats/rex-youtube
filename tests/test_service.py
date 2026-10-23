@@ -1,7 +1,7 @@
 import unittest
 import json
 from unittest.mock import patch
-import service as s
+from app import service as s, playback, source
 
 
 class Tests(unittest.TestCase):
@@ -34,8 +34,7 @@ class Tests(unittest.TestCase):
 
     def test_selected_formats_create_truthful_remux_metadata(self):
         info = self.formats()
-        v, a = s.choose(info)
-        m = s.media_info(info, v, a)
+        m = playback.media_info(playback.choose(info))
         self.assertEqual(m["format"]["format_name"], "hls")
         self.assertEqual(m["streams"][0]["index"], 1)
         self.assertEqual(m["streams"][1]["index"], 0)
@@ -45,16 +44,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(m["format"]["duration"], "120")
 
     def test_no_supported_formats_is_not_published_as_playable(self):
-        with self.assertRaises(RuntimeError):
-            s.choose({"formats": []})
+        with self.assertRaises(ValueError):
+            playback.choose({"formats": []})
 
     def test_playlist_rewrite_uses_local_bounded_memory_tokens(self):
         with patch.object(s, "local_url", return_value="http://relay:8790"):
-            text = s.rewrite(
-                "abcdefghijk",
+            text = playback.rewrite_hls(
                 '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key"\nsegment.ts\n',
                 "https://media.googlevideo.com/list/index.m3u8",
                 {},
+                lambda url, headers, ext: s.token_url("abcdefghijk", url, headers, ext),
             )
         self.assertNotIn("googlevideo.com", text)
         self.assertEqual(text.count("http://relay:8790/hls/abcdefghijk/"), 2)
@@ -70,7 +69,7 @@ class Tests(unittest.TestCase):
                 {"url": "avatar", "width": 900, "height": 900},
             ]
         }
-        self.assertEqual(s.channel_art(listing), "avatar")
+        self.assertEqual(source.channel_art(listing), "avatar")
 
     def test_metadata_edit_locks_title_and_summary(self):
         with patch.object(s, "rex") as rex:

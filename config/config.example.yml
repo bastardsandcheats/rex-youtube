@@ -1,0 +1,109 @@
+# Copy to config/config.yml. This file is public; put real tokens only in config.yml.
+server:
+  host: 0.0.0.0
+  port: 8790
+  public_url: ""                 # Optional address Rex uses to reach this relay.
+  log_level: INFO
+
+rex:
+  url: "http://REX_HOST:REX_PORT"
+  token: ""                      # Or set REX_TOKEN in the service environment.
+  source_id: youtube             # Keep this stable when upgrading an existing catalog.
+
+scan:
+  interval_seconds: 900
+  batch_size: 5                   # New items per source, per poll.
+  max_items: 1000                 # Latest collection entries considered per poll.
+                                 # Existing catalog entries are retained, not pruned.
+playback:
+  max_height: 1080
+  live_buffer_mb: 16              # RAM read-ahead per live playback (1–64 MiB).
+
+defaults:                        # Inherited by sites, then by their source entries.
+  # type defaults to auto; sources can override it with show, movie or live.
+  year_seasons: true              # false puts a show's episodes into `season` below.
+  season: 1
+  check_live: false               # Check a supported channel's separate live URL too.
+
+sites:
+  youtube:
+    enabled: true
+    library: YouTube             # Show library. Defaults to the provider's name.
+    movie_library: YouTube Videos
+    live_library: Live Streams    # Shared by all sites unless overridden here.
+    check_live: false
+    max_items: 100                 # Site default; individual sources can override it.
+    sources:
+      - url: https://www.youtube.com/@TechnologyConnections/videos
+        type: show
+        name: Technology Connections  # Show name, or a single movie's title.
+        year_seasons: true
+        max_items: 20
+        check_live: false
+        enabled: true
+      - url: https://www.youtube.com/@Computerphile/videos
+        type: show
+        year_seasons: false
+        season: 1
+        max_items: 30
+      - url: https://www.youtube.com/@NASA/live
+        type: live                # Explicit live URLs are checked even when the site default is false.
+        name: NASA ISS Live
+
+  vimeo:
+    library: Vimeo
+    sources:
+      - url: https://vimeo.com/linuxfoundation
+        type: show
+        name: Linux Foundation
+        max_items: 10
+
+  twitch:
+    library: Twitch VODs
+    live_library: Live Streams
+    sources:
+      - url: https://www.twitch.tv/csharpfritz/videos
+        type: show
+        check_live: true          # Index archives and check the channel's current broadcast.
+        max_items: 10
+
+  # Any supported extractor can be used here, even before adding a provider file.
+  # To disable a site/source without removing its settings, set enabled: false.
+  # Site/source overrides also accept max_height and batch_size.
+
+  dailymotion:
+    sources:
+      - url: https://www.dailymotion.com/TechRadar
+        type: show
+        name: TechRadar
+        max_items: 10
+      - url: https://www.dailymotion.com/Clubic
+        type: show
+        max_items: 10
+
+  peertube:
+    sources:
+      - url: https://framatube.org/c/joinpeertube/videos
+        type: show
+      - url: https://video.blender.org/c/blender_open_movies/videos
+        type: show
+        name: Blender Open Movies
+        max_items: 10
+
+  tiktok:
+    sources:
+      - url: https://www.tiktok.com/@astrosamantha
+        type: show
+        name: Samantha Cristoforetti
+      - url: https://www.tiktok.com/@nasa
+        type: show
+        name: NASA
+      - url: https://www.tiktok.com/@weathernewslive/live
+        type: live
+        name: Weathernews Live
+
+  bilibili:
+    enabled: false               # Experimental: anonymous access was blocked in testing.
+    sources:
+      - url: https://www.bilibili.com/video/BV15z4y1F7tK/
+        type: movie
