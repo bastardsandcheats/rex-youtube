@@ -67,6 +67,22 @@ class LiveTests(unittest.TestCase):
         self.assertTrue(first.closed and second.closed)
         refresh.assert_called_once()
 
+    def test_separate_live_audio_is_muxed_and_shares_buffer_budget(self):
+        plan = self.plan()
+        plan["audio"] = {"url": "https://cdn.example/audio.m3u8", "protocol": "m3u8"}
+        with (
+            patch.object(live, "HLSStream") as stream,
+            patch.object(live, "MuxedStream") as mux,
+        ):
+            reader = live.open_reader(plan, 16)
+        self.assertEqual(stream.call_count, 2)
+        self.assertEqual(
+            stream.call_args.args[0].get_option("ringbuffer-size"), 8 * 1024 * 1024
+        )
+        self.assertEqual(mux.call_args.kwargs["maps"], ["0:v:0", "1:a:0"])
+        self.assertEqual(mux.call_args.kwargs["format"], "mpegts")
+        self.assertIs(reader, mux.return_value.open.return_value)
+
     def test_offline_confirmation_stops_reconnect(self):
         from providers import Unavailable
 

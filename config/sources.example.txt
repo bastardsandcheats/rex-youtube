@@ -1,13 +1,25 @@
 # Creator collections become shows, with publication years as seasons.
 https://www.youtube.com/@TechnologyConnections/videos
+https://www.youtube.com/@Computerphile/videos
+https://www.youtube.com/@raspberrypi/videos
 https://vimeo.com/businessofsoftware
+https://vimeo.com/linuxfoundation
 https://www.dailymotion.com/ComputerHoy
+https://www.dailymotion.com/TechRadar | TechRadar
+https://www.dailymotion.com/Clubic | Clubic
 https://framatube.org/c/joinpeertube/videos
+https://video.blender.org/c/blender_open_movies/videos | Blender Open Movies
 https://www.tiktok.com/@astrosamantha
+https://www.tiktok.com/@nasa | NASA
 https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time
+https://www.twitch.tv/bashbunni/videos?filter=archives&sort=time
+https://www.twitch.tv/anthonywritescode/videos?filter=archives&sort=time
 
 # Optional collection-name override: URL | Show name
 # A single-video URL instead becomes a movie in the provider's Videos library.
 # A Twitch channel root discovers VODs and, when online, a live movie.
 # Live sources from every provider share the Live Streams movie library:
-# https://www.tiktok.com/@weathernewslive/live
+https://www.youtube.com/@NASA/live | NASA ISS Live
+https://www.youtube.com/@MontereyBayAquarium/live | Monterey Bay Aquarium
+https://www.youtube.com/@ExploreLiveNatureCams/live | Explore Nature Live
+https://www.tiktok.com/@weathernewslive/live

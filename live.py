@@ -14,6 +14,7 @@ from providers import Unavailable
 import streamlink
 from streamlink.stream.hls import HLSStream
 from streamlink.stream.http import HTTPStream
+from streamlink.stream.ffmpegmux import MuxedStream
 
 import playback
 
@@ -28,15 +29,29 @@ LIMIT = threading.BoundedSemaphore(4)
 
 def open_reader(plan, buffer_mb):
     session = streamlink.Streamlink()
-    session.set_option("ringbuffer-size", buffer_mb * 1024 * 1024)
+    # Separate live renditions share the same read-ahead budget. Streamlink's
+    # muxer uses FIFO pipes, never regular media files, to combine their bytes.
+    tracks = [plan["video"]] + ([plan["audio"]] if plan.get("audio") else [])
+    session.set_option("ringbuffer-size", buffer_mb * 1024 * 1024 // len(tracks))
     session.set_option("stream-segment-threads", 2)
     session.set_option("stream-segment-attempts", 5)
     session.set_option("stream-segment-timeout", 8)
     session.set_option("hls-playlist-reload-attempts", 5)
     session.set_option("stream-timeout", 30)
-    fmt = plan["video"]
-    cls = HLSStream if "m3u8" in (fmt.get("protocol") or "") else HTTPStream
-    return cls(session, fmt["url"], headers=playback.headers(plan, fmt)).open()
+    streams = []
+    for fmt in tracks:
+        cls = HLSStream if "m3u8" in (fmt.get("protocol") or "") else HTTPStream
+        stream = cls(session, fmt["url"], headers=playback.headers(plan, fmt))
+        if len(tracks) == 2 and "m3u8" in (fmt.get("protocol") or ""):
+            # YouTube uses ID3 versions Streamlink's packed-audio parser rejects.
+            # Leave those tags intact for FFmpeg's demuxer instead of stripping them.
+            stream.parse_packed_audio = False
+        streams.append(stream)
+    if len(streams) == 2:
+        return MuxedStream(
+            session, *streams, format="mpegts", maps=["0:v:0", "1:a:0"]
+        ).open()
+    return streams[0].open()
 
 
 class LiveRelay:

@@ -378,6 +378,13 @@ class SourceTests(unittest.TestCase):
             "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
         )
 
+    def test_youtube_live_url_is_not_changed_to_a_collection(self):
+        with patch.object(providers, "extract", return_value=None) as extract:
+            list(providers.enumerate_source("https://www.youtube.com/@NASA/live"))
+        self.assertEqual(
+            extract.call_args.args[0], "https://www.youtube.com/@NASA/live"
+        )
+
     def test_publication_sets_year_and_keeps_empty_source_fields_from_erasing_metadata(
         self,
     ):

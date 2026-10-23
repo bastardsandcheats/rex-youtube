@@ -299,7 +299,7 @@ def enumerate_source(url, alias="", limit=1000):
     if (
         detected == "youtube"
         and "/@" in url
-        and not re.search(r"/(videos|streams|shorts)/?$", url)
+        and not re.search(r"/(videos|streams|shorts|live)/?$", url)
     ):
         url = url.rstrip("/") + "/videos"
     if detected == "twitch" and re.fullmatch(
