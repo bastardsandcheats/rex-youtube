@@ -129,6 +129,8 @@ docker build --build-context rexsource=/path/to/rex-source -f tests/rex/Dockerfi
 
 ## Reading and extending the example
 
+Follow the [guide to adding a yt-dlp provider](docs/ADDING_A_PROVIDER.md) for the URL-only path, optional provider naming and playback verification.
+
 `live.py` handles bounded memory buffering and live reconnection; `providers.py` extracts and normalizes public metadata; `playback.py` selects formats and creates manifests; `service.py` maintains the small SQLite catalog, publishes metadata/artwork and serves HTTP. `scripts/probe_sites.py` is the opt-in network check. There is no web UI.
 
 Most yt-dlp extractors already follow the shared path: add a provider label if desired, put a public URL in the source list and prove its playback with the probe script. Add a small special case only when the extractor's metadata or transport actually differs. Vimeo's anonymous embed and Twitch's live resolver are the current examples.
