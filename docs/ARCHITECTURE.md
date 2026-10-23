@@ -32,20 +32,20 @@ reports/configured.md,json Latest --configured run; automatically replaced
 
 ```mermaid
 flowchart TD
-    yaml["config/config.yml: site → sources → overrides"] --> poll["Poll enabled sources"]
-    files["providers/*.py"] --> registry["Automatic registry in app/provider_registry.py"]
+    yaml["config/config.yml<br/>Sites, sources and overrides"] --> poll["Poll enabled sources"]
+    files["providers/*.py"] --> registry["Automatic registry<br/>app/provider_registry.py"]
     registry --> poll
-    poll --> targets["Optional targets / collection_url / live_url hooks"]
+    poll --> targets["Optional URL helpers<br/>targets / collection_url / live_url"]
     targets --> extract["Shared extraction in app/source.py"]
     extract --> prepare["Optional prepare: URL or request options"]
     prepare --> ytdlp["Standard yt-dlp extractor"]
-    extract --> resolve["Optional resolve override: Twitch live → Streamlink"]
+    extract --> resolve["Optional resolve override<br/>Twitch live uses Streamlink"]
     ytdlp --> enrich["Optional enrich / creator metadata hooks"]
     resolve --> enrich
-    enrich --> normalize["Normalize source metadata; apply YAML name/type/season settings"]
+    enrich --> normalize["Normalize metadata<br/>Apply name, type and season settings"]
     normalize --> plan["Choose formats and verify muxed HLS track order"]
     plan --> sqlite["Small metadata SQLite catalog"]
-    sqlite --> feed["Publish explicit placement and source metadata through Rex APIs"]
+    sqlite --> feed["Publish placement and metadata<br/>through Rex APIs"]
     feed --> rex["Rex library and clients"]
 ```
 
@@ -61,8 +61,8 @@ The [generated provider inventory](../reports/PROVIDERS.md) lists every actual h
 flowchart TD
     client["Client → Rex"] --> http["app/service.py HTTP relay"]
     http --> fresh["Resolve fresh signed URLs in RAM"]
-    fresh --> progressive["Progressive media: bytes and Range requests"]
-    fresh --> adaptive["HLS / DASH: rewrite manifests and relay segments"]
+    fresh --> progressive["Progressive media<br/>Bytes and Range requests"]
+    fresh --> adaptive["HLS / DASH<br/>Rewrite manifests; relay segments"]
     fresh --> live["Live: bounded Streamlink read-ahead"]
     live --> tracks["Separate tracks, when needed: FIFO copy-mux"]
     tracks --> ts["FFmpeg copy-mux to MPEG-TS; no encoding"]
@@ -76,15 +76,15 @@ Media is not downloaded to a cache. The service persists metadata and configurat
 ## Provider checks and generated reports
 
 ```mermaid
-flowchart LR
-    input["CLI URL / --all / --configured or HTTP check"] --> child["Fresh bounded worker process"]
-    child --> extraction["Same extraction, normalization and settings"]
-    extraction --> temp["Temporary metadata DB + loopback HTTP relay"]
-    temp --> probe["ffprobe: observed codecs and tracks"]
-    probe --> decode["FFmpeg: decode sample to null output"]
-    decode --> seek["Finite VOD: attempt a seek sample"]
-    seek --> report["Separate capabilities + stage results"]
-    report --> files["Automatic Markdown and JSON reports"]
+flowchart TD
+    input["Start a check<br/>CLI URL, suite or HTTP request"] --> child["Fresh bounded worker process"]
+    child --> extraction["Extract and normalize<br/>using the service settings"]
+    extraction --> temp["Temporary metadata DB<br/>and loopback HTTP relay"]
+    temp --> probe["ffprobe<br/>Check codecs and tracks"]
+    probe --> decode["FFmpeg<br/>Decode a short sample"]
+    decode --> seek["Recorded video<br/>Attempt a seek sample"]
+    seek --> report["Report each stage<br/>and playback capability"]
+    report --> files["Generate reports<br/>Markdown and JSON"]
 ```
 
 The normal checks do not invoke Rex, publish to its feed, or alter the running service's catalog. Process isolation also prevents a check from replacing the active relay's URL caches or configuration. Each case has an overall deadline; timed-out worker process groups are terminated. A collection check inspects one representative video and states that scope explicitly.

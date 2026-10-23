@@ -43,14 +43,13 @@ def provider_markdown():
         "",
         "```mermaid",
         "flowchart LR",
-        '  shared["Shared extraction, metadata and HTTP relay"]',
+        '  shared["Shared extraction<br/>Metadata and HTTP relay"]',
     ]
     for number, site in enumerate(catalog()):
         label = site["name"].replace('"', "&quot;")
-        handlers = " + ".join(site["handlers"]) or "standard yt-dlp output"
-        lines.append(
-            f'  site{number}["{label}"] --> hooks{number}["{handlers}"] --> shared'
-        )
+        # Keep generated nodes narrow enough to read in GitHub's document column.
+        handlers = "<br/>".join(site["handlers"]) or "standard yt-dlp output"
+        lines.append(f'  site{number}["{label}<br/>{handlers}"] --> shared')
     lines += [
         "```",
         "",

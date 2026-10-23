@@ -16,14 +16,14 @@ Generated from `providers/*.py`. Every non-dunder site file is discovered automa
 
 ```mermaid
 flowchart LR
-  shared["Shared extraction, metadata and HTTP relay"]
-  site0["Bilibili"] --> hooks0["prepare"] --> shared
-  site1["Dailymotion"] --> hooks1["creator"] --> shared
-  site2["PeerTube"] --> hooks2["prepare"] --> shared
-  site3["TikTok"] --> hooks3["prepare + live_url"] --> shared
-  site4["Twitch"] --> hooks4["resolve + creator + collection_url + targets + live_status + live_url"] --> shared
-  site5["Vimeo"] --> hooks5["prepare + enrich + creator"] --> shared
-  site6["YouTube"] --> hooks6["collection_url + live_url + entry_url"] --> shared
+  shared["Shared extraction<br/>Metadata and HTTP relay"]
+  site0["Bilibili<br/>prepare"] --> shared
+  site1["Dailymotion<br/>creator"] --> shared
+  site2["PeerTube<br/>prepare"] --> shared
+  site3["TikTok<br/>prepare<br/>live_url"] --> shared
+  site4["Twitch<br/>resolve<br/>creator<br/>collection_url<br/>targets<br/>live_status<br/>live_url"] --> shared
+  site5["Vimeo<br/>prepare<br/>enrich<br/>creator"] --> shared
+  site6["YouTube<br/>collection_url<br/>live_url<br/>entry_url"] --> shared
 ```
 
 Hooks are optional lifecycle callbacks, not separate playback engines. The map lists only the handlers actually defined by each site file.
