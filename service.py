@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import socket
-import subprocess
 import sqlite3
 import threading
 import time
@@ -25,6 +24,7 @@ import requests
 from PIL import Image, ImageOps
 
 import playback
+import live
 import providers
 
 Image.MAX_IMAGE_PIXELS = 16_000_000
@@ -42,6 +42,7 @@ RESOLVE_LOCK = threading.Lock()
 URLS = collections.OrderedDict()
 FORMATS = {}
 LIBRARIES = {}
+ARTWORK = collections.OrderedDict()
 
 
 @contextmanager
@@ -126,11 +127,20 @@ def upload_art_bytes(key, data):
 
 
 def upload_art(key, url):
+    # Creator images are reused by every episode; avoid downloading them per row.
+    cached = (str(key), url)
+    with LOCK:
+        if cached in ARTWORK:
+            return
     image = requests.get(url, timeout=(5, 15))
     image.raise_for_status()
     if len(image.content) > 8_000_000:
         raise ValueError("Thumbnail too large")
     upload_art_bytes(key, image.content)
+    with LOCK:
+        ARTWORK[cached] = True
+        while len(ARTWORK) > 512:
+            ARTWORK.popitem(last=False)
 
 
 def edit(key, kind, fields):
@@ -363,9 +373,15 @@ def publish(row):
         r for r in receipts if r["id"] == row["feed_id"] and not r.get("deleted")
     )
     key = str(receipt["ratingKey"])
-    fields = {"title": item["title"], "summary": item["description"]}
+    fields = {
+        "title": item["title"],
+        "studio": providers.SOURCES.get(item["provider"], item["provider"].title()),
+    }
+    if item.get("description"):
+        fields["summary"] = item["description"]
     if item["published"]:
         fields["originallyAvailableAt"] = item["published"]
+        fields["year"] = int(item["published"][:4])
     edit(key, 4 if item["kind"] == "episode" else 1, fields)
     meta = rex("GET", "/library/metadata/" + key)["MediaContainer"]["Metadata"][0]
     if item.get("thumbnail"):
@@ -378,14 +394,12 @@ def publish(row):
     if item["kind"] == "episode":
         parent = meta.get("grandparentRatingKey")
         if parent:
-            edit(
-                parent,
-                2,
-                {
-                    "title": item["creator_name"],
-                    "summary": item.get("creator_description", ""),
-                },
-            )
+            creator_fields = {"title": item["creator_name"], "studio": fields["studio"]}
+            if item.get("creator_description"):
+                creator_fields["summary"] = item["creator_description"]
+            if item.get("creator_year"):
+                creator_fields["year"] = int(item["creator_year"])
+            edit(parent, 2, creator_fields)
         # Prefer creator artwork; use an episode thumbnail when an extractor has no avatar.
         creator_art = item.get("creator_art") or item.get("thumbnail")
         if creator_art:
@@ -506,12 +520,12 @@ def sync():
     flush_ready()
 
 
-def resolve(key):
+def resolve(key, force=False):
     """Refresh anonymous playback URLs close to use; signed URLs stay in RAM."""
     with RESOLVE_LOCK:
         with LOCK:
             cached = FORMATS.get(key)
-        if cached and time.time() - cached[0] < 120:
+        if not force and cached and time.time() - cached[0] < 120:
             return cached[1]
         with db() as con:
             row = con.execute(
@@ -651,58 +665,28 @@ class Handler(BaseHTTPRequestHandler):
                 for chunk in response.iter_content(65536):
                     self.wfile.write(chunk)
 
-    def live(self, plan, ident, head):
-        """Copy-mux live HLS to indefinite TS: no encoding, seeking or disk buffer.
-
-        Stock Rex proxies a Part using its video-file MIME type. Continuous TS
-        therefore works for live Part reads where forwarding a manifest does not.
-        """
-        url = token_url(
-            ident, plan["video"]["url"], playback.headers(plan, plan["video"]), "m3u8"
-        )
-        self.send_response(200)
-        self.send_header("Content-Type", "video/MP2T")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.response_started = True
-        self.close_connection = True
-        if head:
-            return
-        process = subprocess.Popen(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-i",
-                url,
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0?",
-                "-c",
-                "copy",
-                "-f",
-                "mpegts",
-                "-muxdelay",
-                "0",
-                "pipe:1",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+    def live(self, plan, key, head):
+        if not live.LIMIT.acquire(blocking=False):
+            return self.send_error(503, "All live playback slots are in use")
+        relay = None
         try:
-            while chunk := process.stdout.read(32768):
+            self.send_response(200)
+            self.send_header("Content-Type", "video/MP2T")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.response_started = True
+            self.close_connection = True
+            if head:
+                return
+            relay = live.LiveRelay(
+                plan, lambda: resolve(key, force=True), CFG.get("live_buffer_mb", 16)
+            )
+            for chunk in relay.chunks():
                 self.wfile.write(chunk)
         finally:
-            process.stdout.close()
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            if relay:
+                relay.close()
+            live.LIMIT.release()
 
     def route(self, head):
         self.response_started = False
@@ -725,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                     return token_url(ident, u, h, e)
 
                 if plan["kind"] == "live":
-                    return self.live(plan, ident, head)
+                    return self.live(plan, row[0], head)
                 if plan["kind"] == "hls":
                     text, url = playback.hls_master(plan, relay)
                     return (

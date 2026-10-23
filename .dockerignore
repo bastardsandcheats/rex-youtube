@@ -2,3 +2,5 @@
 !tests/
 !tests/rex/
 !tests/rex/Dockerfile
+!patches/
+!patches/rex-manifest-mime.patch

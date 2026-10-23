@@ -233,6 +233,66 @@ def entry_url(entry):
     raise ValueError("Extractor did not provide a playable webpage URL")
 
 
+@functools.lru_cache(maxsize=128)
+def creator_metadata(source, ident):
+    """Fill creator biographies/avatars from public APIs that need no account."""
+    try:
+        if source == "dailymotion":
+            response = requests.get(
+                "https://api.dailymotion.com/user/" + str(ident),
+                params={"fields": "description,avatar_720_url,created_time"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "description": data.get("description"),
+                "art": data.get("avatar_720_url"),
+                "year": (
+                    datetime.fromtimestamp(data["created_time"], timezone.utc).year
+                    if data.get("created_time")
+                    else None
+                ),
+            }
+        if source == "vimeo":
+            response = requests.get(
+                "https://vimeo.com/api/v2/" + str(ident) + "/info.json", timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "description": data.get("bio"),
+                "art": data.get("portrait_huge"),
+                "year": (data.get("created_on") or "")[:4] or None,
+            }
+        if source == "twitch":
+            from yt_dlp.extractor.twitch import TwitchBaseIE
+
+            response = requests.post(
+                "https://gql.twitch.tv/gql",
+                headers={
+                    "Client-ID": TwitchBaseIE(
+                        yt_dlp.YoutubeDL({"quiet": True, "cachedir": False})
+                    )._CLIENT_ID
+                },
+                json={
+                    "query": "query Creator($login:String!){user(login:$login){description profileImageURL(width:300) createdAt}}",
+                    "variables": {"login": str(ident)},
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json().get("data", {}).get("user") or {}
+            return {
+                "description": data.get("description"),
+                "art": data.get("profileImageURL"),
+                "year": (data.get("createdAt") or "")[:4] or None,
+            }
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        LOG.debug("Public creator metadata unavailable for %s", source)
+    return {}
+
+
 def enumerate_source(url, alias="", limit=1000):
     """Yield webpage references, leaving expensive per-video extraction to the poller."""
     detected = detect(url)
@@ -271,6 +331,13 @@ def enumerate_source(url, alias="", limit=1000):
             info.get("extractor_key") or info.get("extractor") or detected
         ),
     }
+    if collection and entries:
+        details = creator_metadata(context["provider"], context["creator_id"])
+        context["description"] = (
+            context["description"] or details.get("description") or ""
+        )
+        context["art"] = context["art"] or details.get("art")
+        context["year"] = details.get("year")
     for entry in entries:
         if entry:
             yield entry_url(entry), context, entry
@@ -330,6 +397,8 @@ def normalize(info, context=None):
         or source,
         "creator_description": context.get("description") or "",
         "creator_art": context.get("art"),
+        "creator_year": context.get("year"),
+        "categories": info.get("categories") or [],
         "published": f"{date[:4]}-{date[4:6]}-{date[6:8]}" if date else "",
         "timestamp": stamp or 0,
         "duration": info.get("duration") or 0,

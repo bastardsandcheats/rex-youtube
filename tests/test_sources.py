@@ -99,7 +99,10 @@ class SourceTests(unittest.TestCase):
                 {"id": "2", "url": "https://vimeo.com/2"},
             ],
         }
-        with patch.object(providers, "extract", return_value=collection):
+        with (
+            patch.object(providers, "extract", return_value=collection),
+            patch.object(providers, "creator_metadata", return_value={}),
+        ):
             entries = list(providers.enumerate_source("https://vimeo.com/maker"))
         self.assertEqual(
             {r[0] for r in entries}, {"https://vimeo.com/1", "https://vimeo.com/2"}
@@ -374,3 +377,41 @@ class SourceTests(unittest.TestCase):
             extract.call_args.args[0],
             "https://www.twitch.tv/csharpfritz/videos?filter=archives&sort=time",
         )
+
+    def test_publication_sets_year_and_keeps_empty_source_fields_from_erasing_metadata(
+        self,
+    ):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(s, "ROOT", Path(directory)),
+        ):
+            s.init_db()
+            video = info()
+            video["description"] = ""
+            item = providers.normalize(video, {"collection": True})
+            s.save_item(item, playback.choose(video), video["webpage_url"])
+            with s.db() as con:
+                row = dict(con.execute("SELECT * FROM items").fetchone())
+            replies = [
+                {},
+                {"items": [{"id": row["feed_id"], "ratingKey": "55"}]},
+                {
+                    "MediaContainer": {
+                        "Metadata": [
+                            {"grandparentRatingKey": "10", "parentRatingKey": "11"}
+                        ]
+                    }
+                },
+            ]
+            with (
+                patch.object(s, "rex", side_effect=replies),
+                patch.object(s, "ensure_library", return_value="1"),
+                patch.object(s, "edit") as edit,
+                patch.object(s, "upload_art"),
+            ):
+                s.publish(row)
+            fields = edit.call_args_list[0].args[2]
+            self.assertEqual(fields["year"], 2026)
+            self.assertEqual(fields["studio"], "YouTube")
+            self.assertNotIn("summary", fields)
+            self.assertNotIn("summary", edit.call_args_list[1].args[2])

@@ -10,5 +10,6 @@
   "max_height": 1080,
   "log_level": "INFO",
   "rex_token": "",
-  "collection_limit": 1000
+  "collection_limit": 1000,
+  "live_buffer_mb": 16
 }

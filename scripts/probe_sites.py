@@ -145,7 +145,7 @@ def inspect_stream(url):
     return streams
 
 
-def rex_playback(row, live=False):
+def rex_playback(row, live=False, live_seconds=12):
     s.publish(row)
     with s.db() as con:
         key = con.execute(
@@ -166,7 +166,7 @@ def rex_playback(row, live=False):
         part = meta["Media"][0]["Part"][0]["key"]
         # Test continuous playback through the actual Part endpoint, not just source discovery.
         url = s.CFG["rex_url"] + part
-        duration = 12
+        duration = live_seconds
         ident = None
     else:
         ident = uuid.uuid4().hex
@@ -249,6 +249,12 @@ def main():
         action="store_true",
         help="Test creator collections as shows rather than standalone movies",
     )
+    parser.add_argument(
+        "--live-seconds",
+        type=int,
+        default=12,
+        help="Continuous live decode length (default 12 seconds)",
+    )
     args = parser.parse_args()
     examples = COLLECTIONS if args.collections else EXAMPLES
     selected = {k: v for k, v in examples.items() if not args.site or k in args.site}
@@ -307,7 +313,9 @@ def main():
                             actual.get(stream["index"]) == stream["codec_type"]
                         ), "Feed track index disagrees with relay"
                     if rex:
-                        report["rex"] = rex_playback(row, item["is_live"])
+                        report["rex"] = rex_playback(
+                            row, item["is_live"], args.live_seconds
+                        )
                     report["result"] = "passed"
                 except Exception as error:
                     # Error tails can mention signed URLs; reports intentionally omit them.
