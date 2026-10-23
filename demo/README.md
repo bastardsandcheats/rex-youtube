@@ -2,7 +2,7 @@
 
 [Play the demo](rex-youtube-demo.mp4)
 
-Recorded on 23 October 2026 against Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc` with the included manifest MIME patch. The current site libraries are pinned. Each site library now contains multiple creators; the recording browses the library, a creator, its publication-year season and an episode, then shows several seconds of verified Plex Web playback.
+Recorded on 23 October 2026 against Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc` with the former manifest MIME patch. Current compatibility checks use a newer Rex revision without that patch; see the main README. The current site libraries are pinned. Each site library now contains multiple creators; the recording browses the library, a creator, its publication-year season and an episode, then shows several seconds of verified Plex Web playback.
 
 | Site | Creator played |
 | --- | --- |

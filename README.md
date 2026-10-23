@@ -53,11 +53,13 @@ You can also ask the running service with `POST /api/providers/check` and list p
 
 ## Playback and Rex compatibility
 
-The current browser walkthrough was recorded against upstream Rex **`3bdf52bcb2e13ad414b06133768b15d6a753b1fc`** with the included [manifest MIME patch](patches/rex-manifest-mime.patch). Plex Web uses Rex’s native DASH playback support. Native clients reading the Part endpoint need this patch so HLS/DASH responses retain their upstream content type instead of being labelled MP4.
+Last tested against upstream Rex **`306f4aa992700f6a3df5eabd5eca731d24dbedf5`**, without the manifest MIME patch. Fast checks passed for YouTube and Dailymotion HLS, separate-track DASH, and TikTok progressive video. HLS/DASH passed Rex conversion, direct Part decoding and short seek requests. The MIME patch is no longer included or required for these checked paths.
+
+Rex now redirects direct HLS Part reads into its playback conversion and accepts `.m3u8` feed filenames with an HLS probe. The existing demo was recorded on the earlier patched revision; see [tested revisions and limits](docs/TEST_FINDINGS.md). These fast checks do not replace a full Plex Web/Plezy walkthrough or long-running live playback tests.
 
 The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information. Separate-track manifests have a controlled track order and need no probe. Muxed HLS does not declare its track indices, so those items get a small ffprobe header check before publishing; guessing the order breaks browser playback. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
 
-Rex's feed currently accepts video file labels, rather than `.m3u8`/`.mpd` file labels. The feed therefore uses a logical `.mp4` **file** label while **path** points to the actual manifest. This does not create an MP4 or invent a file size. Plex Web uses Rex's DASH transcoder for these manifest sources; the included MIME patch lets native clients identify the manifest behind that logical label.
+This example still uses a logical `.mp4` **file** label while **path** points to the actual manifest. This does not create an MP4 or invent a file size. Current Rex also accepts `.m3u8` labels when the probe identifies HLS. Plex Web uses Rex's DASH transcoder; direct HLS Part reads now follow Rex's upstream conversion redirect.
 
 | Media | Behavior and limits |
 | --- | --- |
@@ -95,7 +97,7 @@ Real media-path checks use public technology/science content and official Blende
 | Bilibili | yt-dlp, anonymous browser impersonation | Experimental: public pages/API blocked by anti-bot responses here; playback unverified |
 | Public DASH sample | yt-dlp generic extractor | Separate-track DASH relay and Rex DASH decode |
 
-With the MIME patch, native Rex Part playback also decoded 12 minutes of a Twitch VOD and complete Dailymotion videos of 271 and 143 seconds. These checks exercise the native media path; they do not establish that every Plezy client works.
+Earlier checks with the former MIME patch decoded 12 minutes of a Twitch VOD and complete Dailymotion videos of 271 and 143 seconds. These checks exercise the native media path; they do not establish that every Plezy client works.
 
 Channel collections from all six accessible providers were also fed as **episodes** and decoded through Rex. The walkthrough uses these creator/show libraries rather than just single-video movie libraries.
 
@@ -117,7 +119,7 @@ venv/bin/python scripts/probe_sites.py --site live-only --live-url https://www.t
 
 Continuous Vimeo playback also passed in Plex Web, but a far seek into its HLS stream stalled.
 
-The upstream `tests/test_native_transcode.py` baseline was run against Rex `a9d5eedc7a7fe39e8b0b1693547d3d9b1300b0c4` with the MIME patch and FFmpeg 7.1.5 (before the later browser walkthrough build): **247/250 checks passed**. The failures were a far-seek timestamp expectation, a Vorbis tone check and an HDR conversion color-tag check. These are upstream playback limits to investigate, not a claim that every format works. To repeat it, follow Rex's native test instructions and set `REX_SERVER` and `REX_TRANSCODER` to your binaries. A clean upstream Rust playback unit-test build with only the included manifest MIME patch is also available:
+The upstream `tests/test_native_transcode.py` baseline was run against Rex `a9d5eedc7a7fe39e8b0b1693547d3d9b1300b0c4` with the MIME patch and FFmpeg 7.1.5 (before the later browser walkthrough build): **247/250 checks passed**. The failures were a far-seek timestamp expectation, a Vorbis tone check and an HDR conversion color-tag check. These are upstream playback limits to investigate, not a claim that every format works. To repeat it, follow Rex's native test instructions and set `REX_SERVER` and `REX_TRANSCODER` to your binaries. The optional Docker test recipe now runs upstream universal playback unit tests without applying a patch; that revised recipe was not rebuilt during the fast checks:
 
 ```sh
 docker build --build-context rexsource=/path/to/rex-source -f tests/rex/Dockerfile .

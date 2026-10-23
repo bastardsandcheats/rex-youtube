@@ -19,9 +19,14 @@ These are bounded sample checks, not an assertion that every upload, full-length
 
 ## Tested revisions
 
-- Browser walkthrough: Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc`, with the included manifest MIME patch.
+- Browser walkthrough: Rex `3bdf52bcb2e13ad414b06133768b15d6a753b1fc`, with the former manifest MIME patch.
 - Isolated Rust playback and full native-transcode baseline: Rex `a9d5eedc7a7fe39e8b0b1693547d3d9b1300b0c4`, with the same patch. These results were not rerun in full against the later browser revision.
-- The supplied playback patch is `patches/rex-manifest-mime.patch`.
+- Latest fast compatibility checks: Rex `306f4aa992700f6a3df5eabd5eca731d24dbedf5`, built by the local updater without the manifest MIME patch. The deployed service passed its health check; probes used the same built executable with disposable catalogs.
+- YouTube HLS and Dailymotion HLS each passed 3-second audio/video decoding through Rex DASH, 2-second direct Part decoding and a seek request at 3 seconds. Direct Part reads redirected to Rex's HLS conversion.
+- A separate-track DASH sample passed the same conversion/direct Part/seek checks. Its direct response still advertised `video/mp4`; FFmpeg decoded it successfully. This does not establish every native client's handling of that MIME label.
+- TikTok progressive H.264/AAC passed 3-second audio/video decoding through Rex DASH.
+- Upstream `test_feed_rejected.py` passed 8/8 and `test_feed_display.py` passed 17/17 against that executable. The service's 80 offline tests were also rerun.
+- The MIME patch was removed after these checks. The full upstream native-transcode baseline, client UI walkthrough and long-running live checks were not repeated.
 
 ## Verified results
 
@@ -56,7 +61,7 @@ Collections from all six accessible providers were stored as episodes under crea
 
 ## Causes found and changes made
 
-- **Manifest MIME mismatch:** a logical `.mp4` feed label could cause Rex's Part endpoint to label an HLS body as MP4. FFmpeg then reported `moov atom not found`. The supplied patch preserves recognized upstream HLS/DASH MIME types. Native playback passed after applying it.
+- **Manifest MIME mismatch:** a logical `.mp4` feed label could cause Rex's Part endpoint to label an HLS body as MP4. FFmpeg then reported `moov atom not found`. The former patch preserved recognized upstream HLS/DASH MIME types. Native playback originally passed after applying it. The latest fast checks above passed without it; upstream Rex now converts direct HLS reads.
 - **Muxed HLS track order:** Dailymotion and Twitch can put audio before video. Assuming the opposite produced incorrect browser stream mappings. Muxed HLS now receives a small header probe before publishing; separately described tracks use their controlled order.
 - **Twitch teaser clips:** an unfiltered channel Videos page can include trailers rather than archived broadcasts. Collection URLs now request `filter=archives&sort=time`.
 - **YouTube live URL handling:** `/@channel/live` was incorrectly eligible for automatic `/videos` suffixing. It is now retained as a live URL, with a regression test.
@@ -77,7 +82,7 @@ Collections from all six accessible providers were stored as episodes under crea
 
 ## Workspace retained after cleanup
 
-- Source, repeatable tests, probe scripts, patch and deployment example.
+- Source, repeatable tests, probe scripts and deployment example.
 - Final demo and its explanatory README.
 - Active private configuration, source lists, metadata database and small rollback backups.
 - Current rotating service log. Rotation is 5,000,000 bytes per file with three backups; INFO is the configured level. Systemd also receives service output.
