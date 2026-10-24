@@ -69,8 +69,14 @@ def choose(info, max_height=1080):
         "video": v,
         "audio": a,
         "headers": info.get("http_headers") or {},
-        "duration": info.get("duration")
-        or sum(f.get("duration") or 0 for f in v.get("fragments", [])),
+        # A rolling playlist window is not the broadcast's total duration.
+        # Rex uses absent/zero duration to keep live playback open-ended.
+        "duration": (
+            0
+            if live
+            else info.get("duration")
+            or sum(f.get("duration") or 0 for f in v.get("fragments", []))
+        ),
         "live": live,
     }
 
@@ -179,7 +185,7 @@ def media_info(plan):
         kind, "webm" if v.get("ext") == "webm" else "mov,mp4,m4a,3gp,3g2,mj2"
     )
     fmt = {"format_name": container}
-    if plan["duration"]:
+    if plan["duration"] and not plan.get("live"):
         fmt["duration"] = str(plan["duration"])
     return {"format": fmt, "streams": plan.get("probe_streams") or streams}
 

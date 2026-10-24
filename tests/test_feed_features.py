@@ -50,6 +50,77 @@ class FeedFeatures(unittest.TestCase):
         self.assertEqual(payload["display"]["date"], "2026-01-02")
         self.assertNotIn("locked", json.dumps(payload))
 
+    def test_live_window_duration_is_not_declared_as_broadcast_length(self):
+        video = copy.deepcopy(self.video)
+        video.update(is_live=True, live_status="is_live", duration=3600)
+        video["formats"][0]["fragments"] = [{"duration": 6}] * 3
+        plan = playback.choose(video)
+        self.assertEqual(plan["duration"], 0)
+        self.assertNotIn("duration", playback.media_info(plan)["format"])
+        row = self.save(video, {"type": "live"})
+        self.assertNotIn(
+            "duration", json.loads(row["metadata"])["media_info"]["format"]
+        )
+        # A finite upload with exactly the same format still has its real length.
+        video.update(is_live=False, live_status="not_live")
+        self.assertEqual(playback.choose(video)["duration"], 3600)
+
+    def test_full_live_probe_drops_window_duration_but_keeps_actual_streams(self):
+        video = copy.deepcopy(self.video)
+        video.update(is_live=True, live_status="is_live", duration=None)
+        measured = {
+            "format": {"format_name": "mpegts", "duration": "18.5"},
+            "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}],
+        }
+        with (
+            patch.object(playback, "full_probe", return_value=measured),
+            patch.object(s, "local_url", return_value="http://127.0.0.1:9999"),
+        ):
+            row = self.save(video, {"type": "live", "probe": True})
+        saved = json.loads(row["metadata"])["media_info"]
+        self.assertNotIn("duration", saved["format"])
+        self.assertEqual(saved["streams"], measured["streams"])
+
+    def test_scanner_and_publisher_do_not_publish_the_same_ready_row_twice(self):
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        from threading import Event
+
+        first = Event()
+        release = Event()
+        second_started = Event()
+        calls = []
+        self.save()
+
+        def publish(row):
+            calls.append(row["key"])
+            first.set()
+            self.assertTrue(release.wait(2))
+            with s.db() as db:
+                db.execute(
+                    "UPDATE items SET status='published' WHERE key=?", (row["key"],)
+                )
+
+        def second():
+            second_started.set()
+            return s.flush_ready()
+
+        with (
+            patch.object(s, "publish", side_effect=publish),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            one = pool.submit(s.flush_ready)
+            self.assertTrue(first.wait(1))
+            two = pool.submit(second)
+            self.assertTrue(second_started.wait(1))
+            try:
+                with self.assertRaises(TimeoutError):
+                    two.result(timeout=0.05)
+            finally:
+                release.set()
+            self.assertTrue(one.result())
+            self.assertTrue(two.result())
+        self.assertEqual(len(calls), 1)
+
     def test_new_backfill_gets_next_number_without_moving_existing_episodes(self):
         original = self.save()
         older = copy.deepcopy(self.video)

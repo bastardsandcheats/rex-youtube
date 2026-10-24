@@ -37,6 +37,7 @@ LOG = logging.getLogger("rex-youtube")
 STOP = threading.Event()
 LOCK = threading.RLock()
 RESOLVE_LOCK = threading.Lock()
+PUBLISH_LOCK = threading.Lock()
 URLS = collections.OrderedDict()
 FORMATS = {}
 LIBRARIES = {}
@@ -330,6 +331,10 @@ def save_item(item, plan, source_entry):
         try:
             # Probe the actual rewritten relay, not an upstream format we do not serve.
             measured = playback.full_probe(local_url() + "/stream/" + path)
+            if item["is_live"]:
+                # Some probes describe only the current DVR/playlist window.
+                # Declaring that as the length makes Rex stop a live broadcast.
+                measured.get("format", {}).pop("duration", None)
             with db() as con:
                 current = json.loads(
                     con.execute(
@@ -544,6 +549,12 @@ def publish(row):
 
 
 def flush_ready():
+    """Serialize delivery shared by the scanner and background publisher."""
+    with PUBLISH_LOCK:
+        return deliver_ready()
+
+
+def deliver_ready():
     """Deliver pending catalog rows without letting one failure stop the rest."""
     with db() as con:
         rows = [
@@ -551,6 +562,8 @@ def flush_ready():
         ]
     success = True
     for row in rows:
+        if STOP.is_set():
+            return False
         try:
             publish(row)
         except Exception as error:
@@ -1095,6 +1108,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(502, "Playback resolution failed; see service log")
 
 
+def publisher():
+    """Publish durable ready rows during long scans; outages leave them queued."""
+    while not STOP.wait(15):
+        try:
+            flush_ready()
+        except Exception as error:
+            LOG.warning("Background delivery failed: %s", type(error).__name__)
+
+
 def worker():
     """Repeat scans until shutdown, isolating failures between polling rounds."""
     while not STOP.is_set():
@@ -1127,6 +1149,7 @@ def main():
     server = ThreadingHTTPServer((CFG["host"], CFG["port"]), Handler)
     server.daemon_threads = True
     threading.Thread(target=worker, daemon=True, name="source-sync").start()
+    threading.Thread(target=publisher, daemon=True, name="feed-publisher").start()
     LOG.info(
         "rex-youtube listening on port %s; metadata only, no media cache", CFG["port"]
     )

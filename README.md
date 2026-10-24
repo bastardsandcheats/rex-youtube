@@ -1,6 +1,6 @@
 # Rex YouTube
 
-> **Example addon:** this project demonstrates how to feed your own web video into Rex. For most setups, [rex-stremio](https://github.com/debridmediamanager/rex-stremio) is the simpler option: give it a Stremio addon’s `manifest.json` URL for the catalogs and streams you want. This example is useful when you want to build or customize the source yourself.
+> **Example addon:** this project demonstrates how to feed your own web video into Rex. For most setups, [rex-stremio](https://github.com/debridmediamanager/rex-stremio) is the simpler option: give it a **Stremio-compatible `manifest.json` URL** for the catalogs and streams you want. This example is useful when you want to build or customize the source yourself.
 
 A small example of feeding public web video into Rex using its feed API and an HTTP server. Despite the historical name, `rex-youtube` includes YouTube, Vimeo, Dailymotion, PeerTube, TikTok and Twitch examples. yt-dlp does the extraction; Streamlink handles public Twitch live streams. This is an educational source adapter, not a universal downloader.
 
@@ -68,6 +68,8 @@ You can also ask the running service with `POST /api/providers/check` and list p
 Latest feed-display/collection integration was checked against upstream Rex **`9671faa2dda20abff12a37885ab2dc0b4bcffccb`**, without a MIME patch. The earlier fast playback baseline used `306f4aa992700f6a3df5eabd5eca731d24dbedf5`. Fast checks passed for YouTube and Dailymotion HLS, separate-track DASH, and TikTok progressive video. HLS/DASH passed Rex conversion, direct Part decoding and short seek requests. The MIME patch is no longer included or required for these checked paths.
 
 Rex now redirects direct HLS Part reads into its playback conversion and accepts `.m3u8` feed filenames with an HLS probe. The existing demo was recorded on the earlier patched revision; see [tested revisions and limits](docs/TEST_FINDINGS.md). These fast checks do not replace a full Plex Web/Plezy walkthrough or long-running live playback tests.
+
+Upstream changes reviewed on 24 October: Rex now supports open-ended live HLS without watch/resume state, tolerates mismatched HLS segment extensions on FFmpeg 7.1+, and refreshes changed playlist track layouts. These are relevant to this addon, but were **not rebuilt or playback-tested in this review**. This does not add a Plex DVR or programme guide. [Commit details and remaining differences](docs/TEST_FINDINGS.md#upstream-notes-review--24-october-2026).
 
 The relay chooses compatible H.264 video up to `max_height` (1080 by default) and available audio. Indexing uses extractor duration/codec information. Separate-track manifests have a controlled track order. In the default `probe: headers` mode, muxed HLS gets a small ffprobe header check before publishing; guessing the order breaks browser playback. Progressive files pass through with HTTP Range support. HLS playlists are rewritten to relay segments and anonymous request headers. DASH and separate audio/video formats are exposed as a small MPD. Rex/FFmpeg performs normal playback conversion.
 

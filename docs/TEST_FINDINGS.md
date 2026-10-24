@@ -19,7 +19,7 @@ These are bounded sample checks, not an assertion that every upload, full-length
 
 ## Addon guide and collection update — 23 October 2026
 
-Reviewed against [Building rex addons](https://notes.debridmediamanager.com/guides/rex-addons/) and PlexControl's static collection implementation. Source titles/artwork now use feed `display`; unchanged known source-created scalar locks can be released without overwriting different user edits. Uploaded posters are retained. Existing episode placements stay fixed, metadata refresh is bounded, selected formats are pinned, and changed delivery/probe layouts get distinct feed versions. Progressive payloads include an exact byte size when known.
+Reviewed against [Building rex addons](https://notes.debridmediamanager.com/rex/addons/) and PlexControl's static collection implementation. Source titles/artwork now use feed `display`; unchanged known source-created scalar locks can be released without overwriting different user edits. Uploaded posters are retained. Existing episode placements stay fixed, metadata refresh is bounded, selected formats are pinned, and changed delivery/probe layouts get distinct feed versions. Progressive payloads include an exact byte size when known.
 
 - **95 offline tests passed**, including display payloads, source-lock migration, stable backfills, pinned/versioned formats, optional full/no probing, YAML compatibility, snapshots/session recovery, failed-source safety, shared ownership, capped discovery and collection GUID protection. Formatting and lint checks passed.
 - A disposable instance of installed Rex **`9671faa2dda20abff12a37885ab2dc0b4bcffccb`** accepted native titles, two channel shows in one static collection, a movie in a separate collection, and a complete snapshot. Changing an indexed channel from show presentation to collection/movie presentation also produced a movie successfully.
@@ -102,3 +102,43 @@ Collections from all six accessible providers were stored as episodes under crea
 - Virtual environment required by the installed service.
 
 Discarded material includes raw probe/build logs, intermediate videos/screenshots, temporary edit clips, the diagnostic Rex binary, one-off debugging scripts, saved browser authentication state, public-audit scratch copies and disposable Python/Ruff caches. No active media catalog, source configuration or upstream media was deleted.
+
+
+## Upstream notes review — 24 October 2026
+
+Read the developer's notes repository and Rex changes from the preceding day,
+through notes `f38b49fe` and Rex `633d8b2`. This is source/documentation review,
+not a new tested-against revision; no Rex rebuild or rex-stremio update was run.
+
+- The notes moved under `rex/`, `zurg/` and `dmm/`. The addon guide now uses
+  rex-stremio as its worked example and explains one declared directory per
+  library. It still documents Plex Live TV/DVR as unsupported.
+- [`8051f45`](https://github.com/debridmediamanager/rex/commit/8051f4561152695b26a93c936487263e586a5ce8)
+  makes duration-less sources live: rolling HLS conversion playlists without an
+  end marker, waiting for future segments, and no watch/resume state. This may
+  address the historical Plex Web live failures; it has not been re-tested here.
+  Our continuous MPEG-TS relay is separate from a DVR/EPG. The addon now ensures
+  an extractor's fragment-window length or a probe's rolling-window duration is
+  not published as the total duration of a live broadcast. Finite VOD durations
+  remain intact.
+- [`5cf6c86`](https://github.com/debridmediamanager/rex/commit/5cf6c8660ed0af048367cc35ef8c6b8668dea532)
+  detects FFmpeg's HLS `extension_picky` support and disables the strict extension
+  check when available. This is relevant to playlists with extensionless or
+  mismatched segment/subtitle URLs. It is a Rex playback fix, not a requirement
+  to rename our libraries. This does not change our own ffprobe invocations; an
+  indexing-time extension-check failure would need equivalent capability-gated
+  handling in the addon as well.
+- [`633d8b2`](https://github.com/debridmediamanager/rex/commit/633d8b2ae43070ec271f2f183e9becfb24b3d2e9)
+  replaces track metadata when a refreshed `.m3u8` probe has changed stream
+  indexes/codecs. Our conservative versioning remains compatible; we have not
+  relaxed it for playlist mirrors in this review.
+- Source-declared directories remain recommended by the guide. This addon still
+  creates/selects libraries explicitly and sends their section keys, which the
+  feed API supports. Its optional probing modes remain a documented tradeoff
+  against the guide's full-probe recommendation.
+
+The Live TV naming experiment was removed. The existing Live Streams section,
+channel keys, pins and country collections were restored in place. Main retains
+an independent background publisher so long backfills do not hold ready items
+until the entire scan finishes. Failed pushes stay ready for retry, and delivery
+is serialized to prevent scanner/publisher races.
