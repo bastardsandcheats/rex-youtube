@@ -1,5 +1,7 @@
 # Rex YouTube
 
+> **Example addon:** this project demonstrates how to feed your own web video into Rex. For most setups, [rex-stremio](https://github.com/debridmediamanager/rex-stremio) is the simpler option: give it a Stremio addon’s `manifest.json` URL for the catalogs and streams you want. This example is useful when you want to build or customize the source yourself.
+
 A small example of feeding public web video into Rex using its feed API and an HTTP server. Despite the historical name, `rex-youtube` includes YouTube, Vimeo, Dailymotion, PeerTube, TikTok and Twitch examples. yt-dlp does the extraction; Streamlink handles public Twitch live streams. This is an educational source adapter, not a universal downloader.
 
 ```text
