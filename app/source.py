@@ -403,3 +403,52 @@ def normalize(info, context=None):
         "kind": kind,
         "is_live": live,
     }
+
+
+def iter_youtube_uploads(url, limit=0):
+    """Yield newest-first entries without yt-dlp materializing every channel page.
+
+    This uses the extractor's lazy entries directly. Processing a playlist first
+    would exhaust those entries even if our caller stops at a known video.
+    Approximate listing dates are only hints; exact publication dates are checked
+    after individual extraction before anything is published.
+    """
+    from itertools import islice
+
+    url = get_definition("youtube").collection_url(url)
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "cachedir": False,
+        "logger": ExtractLog(),
+        "socket_timeout": 20,
+        "retries": 1,
+        "extractor_retries": 1,
+        "extract_flat": True,
+        "lazy_playlist": True,
+        "extractor_args": {"youtubetab": {"approximate_date": ["true"]}},
+    }
+    with yt_dlp.YoutubeDL(opts) as client:
+        info = client.extract_info(url, download=False, process=False) or {}
+        context = {
+            "collection": True,
+            "provider": "youtube",
+            "creator_id": info.get("channel_id")
+            or info.get("uploader_id")
+            or info.get("id"),
+            "name": info.get("channel") or info.get("uploader") or info.get("title"),
+            "art": channel_art(info),
+            "description": info.get("description") or "",
+        }
+        entries = iter(info.get("entries") or [])
+        if limit:
+            entries = islice(entries, limit)
+        try:
+            for entry in entries:
+                if entry and entry.get("id"):
+                    yield entry_url(entry), context, entry
+        finally:
+            close = getattr(entries, "close", None)
+            if close:
+                close()

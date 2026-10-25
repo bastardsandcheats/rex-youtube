@@ -99,3 +99,28 @@ The [checking guide](CHECKING_PROVIDERS.md) explains commands, the HTTP endpoint
 Source URLs own catalog rows through `item_sources`. Failed or capped listings retain cached inventory. After a successful round, unowned rows are withdrawn; complete snapshots reconcile all published cached items. `retired_versions` persists withdrawals when a delivery layout changes. Format IDs/layout are pinned while only signed URLs refresh. Episode numbers are allocated once per placement group.
 
 `app/collections.py` follows the static collection create/member APIs used by PlexControl. It maps episode memberships to their shows, scopes groups by library/type and records each created collection's GUID before changing membership. User collections are not adopted. Probe mode and collection presentation are independent YAML options.
+
+## Incremental YouTube channel handler
+
+```mermaid
+flowchart TD
+    poll[Scheduled channel check] --> pages[Lazy newest-first yt-dlp entries]
+    pages --> stop[Stop at known-ID overlap or January boundary]
+    stop --> inventory[SQLite discovered IDs]
+    inventory --> fresh[New uploads and explicit refresh jobs]
+    inventory --> history[Separate historical metadata queue]
+    fresh --> metadata[Extract metadata and verify exact date]
+    history --> metadata
+    metadata --> feed[Publish new or changed rows to Rex]
+    restricted[Members-only or private listing] --> held[Restricted state: no repeated extraction]
+    pages --> restricted
+    weekly[Weekly year-window reconciliation] --> pages
+```
+
+`app/discovery.py` owns the durable discovery inventory and metadata queue.
+`app/source.py:iter_youtube_uploads` consumes raw lazy extractor entries rather
+than materializing a playlist. Existing providers retain their shared handler.
+The January boundary is stored when a channel is added, and existing media is
+never removed merely because an incremental pass does not return it. Changed
+playback layouts queue an explicit refresh and wake the scanner; routine polling
+does not reopen unchanged uploads.

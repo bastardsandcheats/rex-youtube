@@ -88,9 +88,9 @@ The service keeps at most four live playback relays active. The buffer is not a 
 
 `interval_seconds` on a site or source sets its successful-poll interval (seconds); zero uses the worker interval. Partial or failed scans retry on the next worker cycle. Scheduling survives restarts. Live sources can override a daily site interval with 900 seconds.
 
-Discovery re-reads the listing; it does not use an upstream since-last-poll cursor. Cached items skip extraction until refresh is due. `batch_size` bounds new/refresh work per round.
+YouTube discovery uses lazy newest-first paging and a known-ID overlap, as described below. Other providers use their normal listings. Cached items skip extraction until refresh is due. `batch_size` bounds new/refresh work per round.
 
-`max_items: 0` discovers all available entries. `max_items` limits discovery, not retention: it does not remove older items already in Rex. Decreasing it does not erase older cached uploads. Disabling/removing a source withdraws rows it alone owns after a successful polling round. Undated year-based episodes use season 0. Show, movie and live libraries are separate options because Rex library types cannot be mixed arbitrarily.
+`max_items: 0` removes the item-count ceiling; YouTube channel discovery still observes its persisted January-1 boundary. `max_items` limits discovery, not retention: it does not remove older items already in Rex. Decreasing it does not erase older cached uploads. Disabling/removing a source withdraws rows it alone owns after a successful polling round. Undated year-based episodes use season 0. Show, movie and live libraries are separate options because Rex library types cannot be mixed arbitrarily.
 
 For a known live URL, set `type: live`; this enables checking that entry even when the site's `check_live` default is false. The live-check toggle does not invent an endpoint for a site that lacks a discovery helper. Add an explicit live URL for such a provider. Only a confirmed offline result removes a transient live item; temporary extraction/network failures preserve it.
 
@@ -120,7 +120,7 @@ Set `sites.youtube.probe: false`, for example, to avoid probing that site's inde
 
 `refresh_hours` defaults to 24 and controls revisiting existing uploads for changed titles, descriptions and artwork. Work shares `batch_size` with indexing. Source fields are sent using Rex feed `display`; new publications do not create user-edit locks. Existing user edits and uploaded posters are retained. Known unchanged scalar locks from the older source-edit implementation are released when moving to feed display.
 
-`scan.snapshot_hours` defaults to 6. Snapshots include the full cached inventory, not just the latest discovery window, and are skipped after incomplete scans or delivery failures. An uncapped, successful listing can withdraw disappeared uploads; failed or empty listings cannot erase a channel. Removing a configured source withdraws only items not also owned by another configured source. No upstream video is deleted. Lost snapshot sessions restart at part zero; shrink protection is never forced off.
+`scan.snapshot_hours` defaults to 6. Snapshots include the full cached inventory, not just the latest discovery window, and are skipped after incomplete scans or delivery failures. For legacy providers an uncapped, successful listing can withdraw disappeared uploads; incremental YouTube discovery never treats unseen IDs as deletions; failed or empty listings cannot erase a channel. Removing a configured source withdraws only items not also owned by another configured source. No upstream video is deleted. Lost snapshot sessions restart at part zero; shrink protection is never forced off.
 
 ## Rex collections
 
@@ -151,3 +151,64 @@ Merge this example into the existing `sites` mapping; do not configure one URL t
 `collection` accepts a name, `true` (use the channel name) or `false` (no collection). `type: collection` implies a channel-named collection when no name is given; `collection_type` chooses `movie` (default) or `show`. A plain `type: show` or `type: movie` can independently set `collection` too. `live_collection` has the same name/boolean options, defaults to true, and groups live items by site in their live library. All these options can be set in defaults, at site level or per source.
 
 After a partial scan, reconciliation can add known collection members but does not remove memberships or collections. Only collections created and recorded by this addon are reconciled. A stored GUID must match before editing or deletion. Disabling a group removes its managed collection, never its media or somebody else's collection.
+
+### Incremental YouTube discovery
+
+YouTube channel polls read uploads newest-first and stop after three consecutive
+already-discovered IDs. yt-dlp's lazy extractor is consumed directly, so stopping
+also avoids requesting subsequent channel pages. Failed metadata jobs remain in
+SQLite independently of the discovery boundary; a failed video cannot make all
+older pages get fetched again.
+
+A new channel starts on January 1 of the year it is added. That boundary is
+persisted per channel. Exact extraction dates gate publication; unknown dates
+are retried, and videos older than the boundary are not added. Approximate flat
+listing dates use a two-month overlap near New Year before stopping. Previously
+indexed older media is retained unless explicitly removed.
+
+Weekly year-window reconciliation catches delayed/reordered uploads. Neither a
+short incremental response nor stopping at the date boundary deletes existing
+media. The legacy full-list cache is used once to migrate discovered IDs, not
+re-read for each normal YouTube poll.
+
+Full metadata is fetched once for newly discovered IDs. Existing uploads are not
+re-extracted merely because they are a day old. Changed listing titles or YAML
+delivery settings can explicitly queue an update. Known feed IDs reuse saved
+Rex receipts; new identities require one receipt listing per publication batch.
+
+`scan.backfill_batch_size` (default 25) controls **historical metadata jobs** per
+hourly backfill pass. Newly discovered uploads have priority and are not subject
+to this quota or `scan.max_extracts`. `/api/discovery` reports durable queue
+counts by origin and state, separate from the published media catalog. Retryable failures
+retry after a day rather than causing a busy loop. Explicit members-only/private/age-gated
+entries are marked restricted without repeatedly opening them. Live checks retain their
+separate source schedules.
+
+`scan.cpu_percent` (default 20, range 1–100) controls the background
+extractor's average CPU budget as a percentage of one core. Calls may briefly
+burst above it; the scanner waits after each call according to measured thread
+CPU time, subtracting time already spent waiting for the network. Playback and
+feed delivery do not use this budget. Lower values make large backfills slower
+without reducing video quality or the configured item limit.
+
+### Idle scheduling
+
+The worker persists its next scan time and waits for it across restarts.
+`scan.interval_seconds` sets the delay between scans; per-source intervals may
+make individual sources run less often. When no source, delivery or snapshot is
+due, the scan exits without contacting Rex or reconciling collections.
+The publisher sleeps until new work is queued. Pending deliveries recover once
+at startup, and failed deliveries retry after five minutes.
+
+### Bounding work within a scan
+
+`scan.max_extracts` (default 0, unlimited) bounds legacy provider extractions across
+non-incremental sources in one scan, in addition to each source's `batch_size`. Reaching
+this quota retains queued backfill work for another pass; it never authorizes
+pruning an incomplete inventory. Live checks are separate from this quota.
+
+A site/source `refresh_hours: 0` disables age-only re-extraction of existing
+uploads. Listing title changes, delivery-setting changes, errors and live
+status still trigger extraction. This is useful for large mostly static
+archives: discovering new uploads does not require opening every old upload
+again each day. Changing only this refresh policy does not republish items.

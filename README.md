@@ -150,3 +150,14 @@ A standard yt-dlp site needs only a provider file declaring its name and test UR
 To remove a provider library, first remove or disable its YAML sources and restart this service, then use Rex’s existing `DELETE /library/sections/{id}` endpoint with its usual authentication. This deletes the catalog library, not upstream videos. Leaving its sources enabled lets the next poll recreate it.
 
 The relay serves indexed media to hosts that can reach it, refuses client media deletion and accepts no caller-supplied upstream URL. Bind it to the intended network. Source URLs and artwork are trusted administrator configuration. Do not expose private settings or diagnostic output when sharing the project.
+
+### Incremental YouTube channels
+
+Channels start at January 1 of the year they are added. Polls read newest first
+and stop at an overlap of discovered IDs, without fetching the rest of the
+archive. Only new IDs or explicit metadata changes need individual extraction.
+Historical metadata backfill has its own durable queue and hourly batch; it
+does not cap new discoveries. A weekly year-window reconciliation catches
+delayed uploads. Previously indexed older videos are retained unless explicitly
+removed. Queue counts are available at `/api/discovery`; see
+[settings](docs/SETTINGS.md#incremental-youtube-discovery).

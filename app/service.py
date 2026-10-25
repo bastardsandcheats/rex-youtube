@@ -13,6 +13,7 @@ import os
 import re
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ import requests
 from PIL import Image, ImageOps
 
 from app import config
+from app import discovery
 from app import collections as rex_collections
 from app import playback
 from app import live
@@ -38,6 +40,9 @@ STOP = threading.Event()
 LOCK = threading.RLock()
 RESOLVE_LOCK = threading.Lock()
 PUBLISH_LOCK = threading.Lock()
+PUBLISH_WAKE = threading.Event()
+SCAN_WAKE = threading.Event()
+DB_LOCAL = threading.local()
 URLS = collections.OrderedDict()
 FORMATS = {}
 LIBRARIES = {}
@@ -45,17 +50,44 @@ ARTWORK = collections.OrderedDict()
 CHECK_LIMIT = threading.BoundedSemaphore(2)
 
 
+class ThreadDatabase:
+    """Close the owned connection when a request/worker thread releases its local state."""
+
+    def __init__(self, path):
+        self.connection = sqlite3.connect(path, timeout=30)
+        self.connection.row_factory = sqlite3.Row
+
+    def __del__(self):
+        try:
+            self.connection.close()
+        except Exception:
+            pass  # Interpreter shutdown may already have torn down SQLite.
+
+
 @contextmanager
 def db():
-    """Open one SQLite connection per operation; never share connections across threads."""
-    (ROOT / "data").mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(ROOT / "data" / "metadata.db", timeout=30)
-    con.row_factory = sqlite3.Row
+    """Reuse one connection per thread/path; commit each short operation.
+
+    Closing the last WAL connection after every row forced repeated database
+    reopening and checkpoints. Connections never cross threads, and changing
+    ROOT (for isolated checks/tests) closes the old connection first.
+    """
+    path = ROOT / "data" / "metadata.db"
+    if getattr(DB_LOCAL, "path", None) != path:
+        previous = getattr(DB_LOCAL, "connection", None)
+        if previous is not None:
+            previous.close()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        holder = ThreadDatabase(path)
+        DB_LOCAL.path, DB_LOCAL.holder = path, holder
+        DB_LOCAL.connection = holder.connection
+    con = DB_LOCAL.connection
     try:
         yield con
         con.commit()
-    finally:
-        con.close()
+    except BaseException:
+        con.rollback()
+        raise
 
 
 def state(key, value=None):
@@ -167,7 +199,21 @@ def init_db():
         CREATE TABLE IF NOT EXISTS retired_versions(id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS item_sources(source TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(source,key));
         CREATE TABLE IF NOT EXISTS failures(url TEXT PRIMARY KEY,checked REAL,error TEXT);
+        CREATE TABLE IF NOT EXISTS source_listings(
+            source TEXT PRIMARY KEY, checked REAL NOT NULL, entries TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS items_status ON items(status);
+        CREATE INDEX IF NOT EXISTS items_feed_id ON items(feed_id);
+        CREATE INDEX IF NOT EXISTS items_pending_episode ON items(
+            json_extract(metadata,'$.creator_id'), json_extract(metadata,'$.kind'),
+            coalesce(json_extract(metadata,'$.episode'),0));
+        CREATE INDEX IF NOT EXISTS items_episode_number ON items(
+            json_extract(metadata,'$.creator_id'), json_extract(metadata,'$.provider'),
+            coalesce(json_extract(metadata,'$.season'),cast(substr(json_extract(metadata,'$.published'),1,4) as integer)),
+            json_extract(metadata,'$.library_name'), json_extract(metadata,'$.episode'));
+        CREATE INDEX IF NOT EXISTS items_source_live ON items(
+            json_extract(metadata,'$.source_entry'), json_extract(metadata,'$.is_live'));
         """)
+        discovery.init_db(con)
         # Additive ownership bookkeeping keeps existing YAML/catalogs usable.
         con.execute(
             "INSERT OR IGNORE INTO item_sources SELECT json_extract(metadata,'$.source_entry'),key FROM items WHERE json_extract(metadata,'$.source_entry') IS NOT NULL"
@@ -317,7 +363,7 @@ def save_item(item, plan, source_entry):
             )
         status = "probing" if item.get("probe") is True else "ready"
         con.execute(
-            "INSERT INTO items VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET metadata=excluded.metadata,feed_id=excluded.feed_id,relay_path=excluded.relay_path,status=excluded.status",
+            "INSERT INTO items VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET metadata=excluded.metadata,feed_id=excluded.feed_id,relay_path=excluded.relay_path,status=excluded.status,rating_key=CASE WHEN items.feed_id=excluded.feed_id THEN items.rating_key ELSE NULL END",
             (item["key"], json.dumps(item), feed_id, path, None, status),
         )
         con.execute(
@@ -359,7 +405,7 @@ def save_item(item, plan, source_entry):
                         (previous["feed_id"],),
                     )
                     con.execute(
-                        "UPDATE items SET feed_id=?,relay_path=? WHERE key=?",
+                        "UPDATE items SET feed_id=?,relay_path=?,rating_key=NULL WHERE key=?",
                         (measured_id, measured_path, item["key"]),
                     )
                 if (
@@ -378,12 +424,21 @@ def save_item(item, plan, source_entry):
                 )
             raise
 
+    PUBLISH_WAKE.set()
+
 
 def reorder(creator_id):
     """Assign numbers only to new placements. Backfills never renumber existing uploads."""
     with db() as con:
+        # The expression index excludes all already-numbered rows before JSON decoding.
         rows = [
-            (r, json.loads(r["metadata"])) for r in con.execute("SELECT * FROM items")
+            (r, json.loads(r["metadata"]))
+            for r in con.execute(
+                "SELECT * FROM items WHERE json_extract(metadata,'$.creator_id')=? "
+                "AND json_extract(metadata,'$.kind')='episode' "
+                "AND coalesce(json_extract(metadata,'$.episode'),0)=0",
+                (creator_id,),
+            )
         ]
         groups = collections.defaultdict(list)
         for row, item in rows:
@@ -395,8 +450,16 @@ def reorder(creator_id):
                         item.get("library_name"),
                     )
                 ].append((row, item))
-        for members in groups.values():
-            number = max((item.get("episode", 0) for _, item in members), default=0)
+        for (provider, season, library), members in groups.items():
+            # Indexed MAX reads the last assigned number without loading the channel.
+            number = con.execute(
+                "SELECT coalesce(max(json_extract(metadata,'$.episode')),0) FROM items "
+                "WHERE json_extract(metadata,'$.creator_id')=? "
+                "AND json_extract(metadata,'$.provider')=? "
+                "AND coalesce(json_extract(metadata,'$.season'),cast(substr(json_extract(metadata,'$.published'),1,4) as integer))=? "
+                "AND json_extract(metadata,'$.library_name') IS ?",
+                (creator_id, provider, season, library),
+            ).fetchone()[0]
             for row, item in sorted(
                 members,
                 key=lambda r: (
@@ -466,8 +529,11 @@ def feed_item(row):
 def retire_versions():
     """Retry version withdrawals after a crash; new versions have distinct file labels."""
     with db() as con:
+        if not con.execute("SELECT 1 FROM retired_versions LIMIT 1").fetchone():
+            return
         con.execute(
-            "DELETE FROM retired_versions WHERE id IN (SELECT feed_id FROM items)"
+            "DELETE FROM retired_versions WHERE EXISTS "
+            "(SELECT 1 FROM items WHERE feed_id=retired_versions.id)"
         )
         ids = [r[0] for r in con.execute("SELECT id FROM retired_versions")]
     for offset in range(0, len(ids), 200):
@@ -526,26 +592,59 @@ def release_source_locks(row, item):
 
 
 def publish(row):
-    item = json.loads(row["metadata"])
-    release_source_locks(row, item)
-    payload = feed_item(row)
+    """Publish a single row for callers outside the background queue."""
+    publish_batch([row])
+
+
+def publish_batch(rows):
+    """One upsert and receipt listing per bounded batch, not per video.
+
+    Only confirmed, active receipts complete local work. A failed or partial
+    response leaves unconfirmed rows queued for an idempotent retry.
+    """
+    for row in rows:
+        release_source_locks(row, json.loads(row["metadata"]))
     response = rex(
-        "POST", "/rex/feed/" + CFG["source"] + "/items", {"items": [payload]}
+        "POST",
+        "/rex/feed/" + CFG["source"] + "/items",
+        {"items": [feed_item(row) for row in rows]},
     )
     if response.get("rejected") or response.get("held"):
-        raise RuntimeError("Rex refused the media metadata: " + str(response))
-    receipts = rex("GET", "/rex/feed/" + CFG["source"] + "/items")["items"]
-    receipt = next(
-        r for r in receipts if r["id"] == row["feed_id"] and not r.get("deleted")
-    )
-    item["native_display"] = True
-    item.pop("legacy_display", None)
-    with db() as con:
-        con.execute(
-            "UPDATE items SET rating_key=?,status='published',metadata=? WHERE key=?",
-            (str(receipt["ratingKey"]), json.dumps(item), row["key"]),
+        raise RuntimeError("Rex refused media metadata in the publication batch")
+    receipts = {
+        row["feed_id"]: {"ratingKey": row["rating_key"]}
+        for row in rows
+        if row.get("rating_key")
+    }
+    if any(row["feed_id"] not in receipts for row in rows):
+        receipts.update(
+            {
+                receipt["id"]: receipt
+                for receipt in rex("GET", "/rex/feed/" + CFG["source"] + "/items")[
+                    "items"
+                ]
+                if not receipt.get("deleted") and receipt.get("ratingKey")
+            }
         )
-    LOG.info("Published %s: %s", json.loads(row["metadata"])["provider"], row["key"])
+    confirmed = []
+    with db() as con:
+        for row in rows:
+            receipt = receipts.get(row["feed_id"])
+            if receipt is None:
+                continue
+            item = json.loads(row["metadata"])
+            item["native_display"] = True
+            item.pop("legacy_display", None)
+            con.execute(
+                "UPDATE items SET rating_key=?,status='published',metadata=? WHERE key=?",
+                (str(receipt["ratingKey"]), json.dumps(item), row["key"]),
+            )
+            confirmed.append(row["key"])
+    LOG.info("Published batch: %d/%d items", len(confirmed), len(rows))
+    if len(confirmed) != len(rows):
+        raise RuntimeError(
+            "Rex publication receipts missing; unconfirmed items remain queued"
+        )
 
 
 def flush_ready():
@@ -561,14 +660,17 @@ def deliver_ready():
             dict(r) for r in con.execute("SELECT * FROM items WHERE status='ready'")
         ]
     success = True
-    for row in rows:
+    for offset in range(0, len(rows), 100):
         if STOP.is_set():
             return False
+        batch = rows[offset : offset + 100]
         try:
-            publish(row)
+            publish_batch(batch)
         except Exception as error:
             success = False
-            LOG.warning("Delivery failed for %s: %s", row["key"], type(error).__name__)
+            LOG.warning(
+                "Delivery batch failed (%d items): %s", len(batch), type(error).__name__
+            )
     if success:
         retire_versions()
     return success
@@ -578,7 +680,12 @@ def remove_offline(source_entry):
     """Only a positive offline result may remove a transient live movie."""
     with db() as con:
         rows = [
-            (r, json.loads(r["metadata"])) for r in con.execute("SELECT * FROM items")
+            (r, json.loads(r["metadata"]))
+            for r in con.execute(
+                "SELECT * FROM items WHERE json_extract(metadata,'$.source_entry')=? "
+                "AND json_extract(metadata,'$.is_live')=1",
+                (source_entry,),
+            )
         ]
     for row, item in rows:
         if item["is_live"] and item.get("source_entry") == source_entry:
@@ -592,9 +699,60 @@ def remove_offline(source_entry):
             LOG.info("Removed offline live item: %s", row["key"])
 
 
-def sync_source(url, settings):
+def background_call(call, *args, **kwargs):
+    """Average a single scanner thread's CPU use without delaying playback.
+
+    yt-dlp calls are not preempted: their measured thread CPU cost determines
+    an interruptible pause afterwards. Network waiting already counts as yield.
+    """
+    started, cpu = time.monotonic(), time.thread_time()
+    try:
+        return call(*args, **kwargs)
+    finally:
+        target = CFG.get("scan_cpu_percent", 20) / 100
+        pause = (time.thread_time() - cpu) / target - (time.monotonic() - started)
+        if pause > 0:
+            STOP.wait(pause)
+
+
+def source_listing(url, settings):
+    """Reuse a channel listing while a bounded metadata backfill catches up.
+
+    The cache is durable so restarts do not re-enumerate thousands of uploads.
+    Live targets always query upstream. Only successfully exhausted listings are
+    cached; extraction failures never replace an earlier successful inventory.
+    """
+    cacheable = (
+        providers.detect(url) == "youtube"
+        and "/@" in url
+        and not url.rstrip("/").endswith("/live")
+        and settings.get("type") != "live"
+    )
+    identity = json.dumps([url, settings["max_items"]])
+    ttl = max(3600, settings.get("interval_seconds", 0))
+    if cacheable:
+        with db() as con:
+            cached = con.execute(
+                "SELECT entries FROM source_listings WHERE source=? AND checked>?",
+                (identity, time.time() - ttl),
+            ).fetchone()
+        if cached:
+            return json.loads(cached[0])
+    entries = background_call(
+        lambda: list(providers.enumerate_source(url, limit=settings["max_items"]))
+    )
+    if cacheable and entries:
+        with db() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO source_listings VALUES(?,?,?)",
+                (identity, time.time(), json.dumps(entries)),
+            )
+    return entries
+
+
+def sync_source(url, settings, budget=None, *, entries=None, force=False, prune=True):
     """Refresh a bounded batch, retaining cached items outside a capped listing window."""
-    entries = list(providers.enumerate_source(url, limit=settings["max_items"]))
+    entries = source_listing(url, settings) if entries is None else entries
     count = 0
     complete = bool(entries)
     seen = set()
@@ -628,23 +786,39 @@ def sync_source(url, settings):
                 updated.get("library_name"),
             ):
                 updated["episode"] = 0
-            if updated != previous:
+            visible_change = any(
+                updated.get(field) != previous.get(field)
+                for field in updated.keys() | previous.keys()
+                if field != "refresh_hours"
+            )
+            if visible_change:
                 with db() as con:
                     con.execute(
                         "UPDATE items SET metadata=?,status='ready' WHERE key=?",
                         (json.dumps(updated), key),
                     )
                 reorder(updated["creator_id"])
+                PUBLISH_WAKE.set()
             with db() as con:
                 con.execute(
                     "INSERT OR IGNORE INTO item_sources VALUES(?,?)", (url, key)
                 )
-            due = (
-                time.time() - previous.get("checked", 0)
-                >= settings.get("refresh_hours", 24) * 3600
+            refresh_hours = settings.get("refresh_hours", 24)
+            due = bool(refresh_hours) and (
+                time.time() - previous.get("checked", 0) >= refresh_hours * 3600
+            )
+            # Channel listings already expose changed titles. A disabled periodic
+            # refresh must still notice those and actively check live broadcasts.
+            title_changed = bool(entry.get("title")) and " ".join(
+                entry["title"].split()
+            ) != " ".join(
+                str(previous.get("source_title", previous.get("title", ""))).split()
             )
             needs_extract = (
-                due
+                force
+                or due
+                or title_changed
+                or bool(previous.get("is_live"))
                 or previous.get("max_height", CFG["max_height"])
                 != settings.get("max_height", CFG["max_height"])
                 or previous.get("probe", "headers") != settings.get("probe", "headers")
@@ -664,9 +838,25 @@ def sync_source(url, settings):
             # Cached items are still valid; unindexed items mean this is not a full scan.
             complete = complete and old is not None
             continue
+        # Bound the entire upload pass, not just each of many large channels.
+        # Live status checks are independent of the upload backfill quota.
+        if budget is not None and settings.get("type") != "live":
+            if budget["remaining"] <= 0:
+                complete = False
+                continue
+            budget["remaining"] -= 1
         count += 1
         try:
-            info = providers.extract(webpage)
+            info = background_call(providers.extract, webpage)
+            if entry.get("_since"):
+                published = discovery.date(
+                    info.get("upload_date") or info.get("release_date")
+                )
+                if not published:
+                    complete = False
+                    continue
+                if published < entry["_since"]:
+                    continue  # An exact date is required before publishing a year-limited upload.
             item = providers.apply_settings(
                 providers.normalize(info, context), settings, context
             )
@@ -696,15 +886,17 @@ def sync_source(url, settings):
         except Exception as error:
             complete = False
             LOG.warning("Cannot index %s: %s", source, type(error).__name__)
+            reason = discovery.restriction(error) or type(error).__name__
             with db() as con:
                 con.execute(
                     "INSERT OR REPLACE INTO failures VALUES(?,?,?)",
-                    (webpage, time.time(), type(error).__name__),
+                    (webpage, time.time(), reason),
                 )
     # Only a complete, uncapped listing can prove that an old upload disappeared.
     # An empty result is deliberately not taken as authority to remove everything.
     if (
-        complete
+        prune
+        and complete
         and entries
         and (not settings["max_items"] or len(entries) < settings["max_items"])
     ):
@@ -786,9 +978,44 @@ def snapshot():
 
 def sync():
     """Refresh metadata, reconcile ownership and publish only complete snapshots."""
+    runtime = sys.modules[__name__]
+    discovery.seed(runtime)
+    targets = [
+        target
+        for entry in config.source_entries(CFG)
+        for target in providers.configured_targets(entry)
+    ]
+    channels = {
+        target["url"]: target["options"]
+        for target in targets
+        if discovery.channel(target["url"], target["options"])
+    }
+    due = {
+        target["url"]
+        for target in targets
+        if time.time() - float(state("source_poll:" + target["url"]) or 0)
+        >= target["options"].get("interval_seconds", 0)
+    }
+    snapshot_due = (
+        time.time() - float(state("last_snapshot") or 0)
+        >= CFG.get("snapshot_hours", 6) * 3600
+    )
+    with db() as con:
+        pending = con.execute(
+            "SELECT 1 FROM items WHERE status='ready' "
+            "UNION ALL SELECT 1 FROM retired_versions LIMIT 1"
+        ).fetchone()
+    if (
+        not due
+        and not pending
+        and not snapshot_due
+        and not discovery.pending(runtime, channels)
+    ):
+        return  # No registration, catalog decoding, HTTP calls or collection work.
     setup_rex()
     complete = flush_ready()
     active = set()
+    budget = {"remaining": CFG["max_extracts"]} if CFG.get("max_extracts") else None
     for entry in config.source_entries(CFG):
         for target in providers.configured_targets(entry):
             url = target["url"]
@@ -799,7 +1026,11 @@ def sync():
             if interval and time.time() - last_poll < interval:
                 continue
             try:
-                source_complete = sync_source(url, target["options"])
+                source_complete = (
+                    discovery.discover(runtime, url, target["options"])
+                    if url in channels
+                    else sync_source(url, target["options"], budget)
+                )
                 if source_complete:
                     state("source_poll:" + url, time.time())
                 complete = source_complete and complete
@@ -808,6 +1039,7 @@ def sync():
             except Exception as error:
                 complete = False
                 LOG.warning("Source check failed: %s", type(error).__name__)
+    discovery.process(runtime, channels)
     if complete:
         reconcile_sources(active)
     complete = flush_ready() and complete
@@ -853,12 +1085,19 @@ def resolve(key, force=False):
             ):
                 raise ValueError("Published media layout changed")
         except ValueError:
-            # Refuse mismatched bytes now; the next poll publishes a new feed version.
+            # Refuse mismatched bytes, but explicitly queue this item's refresh.
+            # Incremental discovery no longer re-extracts the whole archive by age.
             with db() as con:
                 item["checked"] = 0
                 con.execute(
                     "UPDATE items SET metadata=? WHERE key=?", (json.dumps(item), key)
                 )
+                queued = con.execute(
+                    "UPDATE upload_inventory SET status='pending',origin='new',retry_after=0 WHERE key=?",
+                    (key,),
+                ).rowcount
+            if queued:
+                SCAN_WAKE.set()
             raise
         with LOCK:
             FORMATS[key] = (time.time(), plan)
@@ -1044,6 +1283,12 @@ class Handler(BaseHTTPRequestHandler):
                     "application/json",
                     head,
                 )
+            if path == "/api/discovery":
+                return self.data(
+                    json.dumps({"jobs": discovery.stats(sys.modules[__name__])}),
+                    "application/json",
+                    head,
+                )
             if path == "/health":
                 return self.data('{"ok":true}', "application/json", head)
             if path.startswith("/stream/"):
@@ -1109,22 +1354,42 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def publisher():
-    """Publish durable ready rows during long scans; outages leave them queued."""
-    while not STOP.wait(15):
+    """Sleep until delivery is requested; only failed delivery gets a timed retry."""
+    retry_seconds = None
+    while not STOP.is_set():
+        PUBLISH_WAKE.wait(retry_seconds)
+        PUBLISH_WAKE.clear()
+        if STOP.is_set():
+            return
         try:
-            flush_ready()
+            retry_seconds = None if flush_ready() else 300
         except Exception as error:
+            retry_seconds = 300
             LOG.warning("Background delivery failed: %s", type(error).__name__)
 
 
 def worker():
-    """Repeat scans until shutdown, isolating failures between polling rounds."""
+    """Honor the durable next scan time, including across service restarts."""
     while not STOP.is_set():
+        delay = max(0, float(state("next_scan") or 0) - time.time())
+        if delay:
+            SCAN_WAKE.wait(delay)
+            SCAN_WAKE.clear()
+            if STOP.is_set():
+                return
+        state("next_scan", time.time() + CFG["interval_seconds"])
+        started = time.monotonic()
+        LOG.info("Scan started")
         try:
             sync()
         except Exception as error:
             LOG.warning("Refresh failed: %s", str(error)[:250])
-        STOP.wait(CFG["interval_seconds"])
+        state("next_scan", time.time() + CFG["interval_seconds"])
+        LOG.info(
+            "Scan finished in %.1fs; next scan in %ds",
+            time.monotonic() - started,
+            CFG["interval_seconds"],
+        )
 
 
 def main():
@@ -1146,6 +1411,7 @@ def main():
         ],
     )
     init_db()
+    PUBLISH_WAKE.set()  # Recover durable pending deliveries once at startup.
     server = ThreadingHTTPServer((CFG["host"], CFG["port"]), Handler)
     server.daemon_threads = True
     threading.Thread(target=worker, daemon=True, name="source-sync").start()
@@ -1157,6 +1423,8 @@ def main():
         server.serve_forever()
     finally:
         STOP.set()
+        SCAN_WAKE.set()
+        PUBLISH_WAKE.set()
         server.server_close()
 
 

@@ -81,6 +81,241 @@ class FeedFeatures(unittest.TestCase):
         self.assertNotIn("duration", saved["format"])
         self.assertEqual(saved["streams"], measured["streams"])
 
+    def test_database_reuses_thread_connection_and_rolls_back_failed_work(self):
+        with s.db() as first:
+            first_id = id(first)
+        with s.db() as again:
+            self.assertEqual(id(again), first_id)
+        with self.assertRaises(RuntimeError):
+            with s.db() as con:
+                con.execute("INSERT INTO state VALUES('rollback-test','value')")
+                raise RuntimeError("failed operation")
+        self.assertIsNone(s.state("rollback-test"))
+        from concurrent.futures import ThreadPoolExecutor
+
+        def other_thread():
+            with s.db() as con:
+                return id(con)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self.assertNotEqual(pool.submit(other_thread).result(), first_id)
+
+    def test_known_receipt_does_not_fetch_whole_feed_on_update(self):
+        row = self.save()
+        row["rating_key"] = "55"
+        with (
+            patch.object(s, "release_source_locks"),
+            patch.object(s, "ensure_library", return_value="1"),
+            patch.object(s, "rex", return_value={}) as request,
+        ):
+            s.publish_batch([row])
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.args[0], "POST")
+
+    def test_zero_refresh_skips_old_unchanged_upload_but_not_changed_title(self):
+        self.save()
+        with s.db() as con:
+            item = json.loads(con.execute("SELECT metadata FROM items").fetchone()[0])
+            item["checked"] = 0
+            con.execute(
+                "UPDATE items SET metadata=?,status='published'", (json.dumps(item),)
+            )
+        opts = dict(config.DEFAULT_OPTIONS, refresh_hours=0)
+        entry = dict(self.video)
+        entry["title"] += "  "
+        context = {"collection": True, "provider": "youtube"}
+        with (
+            patch.object(
+                s,
+                "source_listing",
+                return_value=[(self.video["webpage_url"], context, entry)],
+            ),
+            patch.object(
+                source, "extract", side_effect=RuntimeError("must not extract")
+            ) as extract,
+        ):
+            self.assertTrue(s.sync_source("https://example.invalid/channel", opts))
+            extract.assert_not_called()
+            with s.db() as con:
+                self.assertEqual(
+                    con.execute("SELECT status FROM items").fetchone()[0], "published"
+                )
+            entry["title"] = "Changed upstream title"
+            self.assertFalse(s.sync_source("https://example.invalid/channel", opts))
+            extract.assert_called_once()
+
+    def test_global_upload_quota_leaves_unprocessed_uploads_for_later(self):
+        entry = dict(self.video)
+        with (
+            patch.object(
+                s,
+                "source_listing",
+                return_value=[
+                    (self.video["webpage_url"], {"provider": "youtube"}, entry)
+                ],
+            ),
+            patch.object(source, "extract") as extract,
+        ):
+            self.assertFalse(
+                s.sync_source(
+                    "https://example.invalid/channel",
+                    dict(config.DEFAULT_OPTIONS),
+                    {"remaining": 0},
+                )
+            )
+        extract.assert_not_called()
+
+    def test_worker_honors_saved_next_scan_before_starting_work(self):
+        with (
+            patch.object(s, "state", return_value="1000") as state,
+            patch.object(s.time, "time", return_value=100),
+            patch.object(s, "STOP") as stop,
+            patch.object(s, "SCAN_WAKE") as wake,
+            patch.object(s, "sync") as sync,
+        ):
+            stop.is_set.side_effect = [False, True]
+            s.worker()
+        wake.wait.assert_called_once_with(900)
+        state.assert_called_once_with("next_scan")
+        sync.assert_not_called()
+
+    def test_idle_sync_does_not_contact_rex_or_decode_catalog(self):
+        now = s.time.time()
+        s.state("last_snapshot", now)
+        target = {
+            "url": "https://example.invalid/source",
+            "options": {"interval_seconds": 86400},
+        }
+        s.state("source_poll:" + target["url"], now)
+        with (
+            patch.object(s.config, "source_entries", return_value=[{}]),
+            patch.object(s.providers, "configured_targets", return_value=[target]),
+            patch.object(s, "rex") as rex,
+            patch.object(s, "catalog_rows") as rows,
+        ):
+            s.sync()
+        rex.assert_not_called()
+        rows.assert_not_called()
+
+    def test_publisher_sleeps_after_success_until_woken(self):
+        import threading
+
+        stop, wake, delivered = threading.Event(), threading.Event(), threading.Event()
+
+        def deliver():
+            delivered.set()
+            return True
+
+        with (
+            patch.object(s, "STOP", stop),
+            patch.object(s, "PUBLISH_WAKE", wake),
+            patch.object(s, "flush_ready", side_effect=deliver) as flush,
+        ):
+            thread = threading.Thread(target=s.publisher)
+            thread.start()
+            try:
+                self.assertFalse(delivered.wait(0.05))
+                wake.set()
+                self.assertTrue(delivered.wait(1))
+                self.assertFalse(stop.wait(0.05))
+                self.assertEqual(flush.call_count, 1)
+            finally:
+                stop.set()
+                wake.set()
+                thread.join(1)
+            self.assertFalse(thread.is_alive())
+
+    def test_scanner_cpu_budget_yields_without_changing_result(self):
+        with (
+            patch.dict(s.CFG, {"scan_cpu_percent": 20}),
+            patch.object(s.time, "thread_time", side_effect=[0.0, 0.4]),
+            patch.object(s.time, "monotonic", side_effect=[0.0, 0.5]),
+            patch.object(s.STOP, "wait") as wait,
+        ):
+            self.assertEqual(s.background_call(lambda: "result"), "result")
+        wait.assert_called_once_with(1.5)
+
+    def test_channel_listing_survives_repeated_backfill_passes_and_limit_changes(self):
+        url = "https://www.youtube.com/@Example"
+        settings = {"max_items": 0, "interval_seconds": 86400}
+        listing = [
+            ("https://example.invalid/watch", {"provider": "youtube"}, {"id": "one"})
+        ]
+        with patch.object(
+            s.providers, "enumerate_source", return_value=iter(listing)
+        ) as fetch:
+            first = s.source_listing(url, settings)
+            second = s.source_listing(url, settings)
+        self.assertEqual(json.loads(json.dumps(first)), second)
+        self.assertEqual(fetch.call_count, 1)
+        with patch.object(
+            s.providers, "enumerate_source", return_value=iter(listing)
+        ) as fetch:
+            s.source_listing(url, dict(settings, max_items=100))
+        fetch.assert_called_once()
+        with patch.object(
+            s.providers, "enumerate_source", side_effect=lambda *a, **k: iter(listing)
+        ) as fetch:
+            s.source_listing(url + "/live", settings)
+            s.source_listing(url + "/live", settings)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_numbered_channel_does_not_decode_catalog_again(self):
+        row = self.save()
+        creator = json.loads(row["metadata"])["creator_id"]
+        with patch.object(s.json, "loads", wraps=json.loads) as loads:
+            s.reorder(creator)
+        loads.assert_not_called()
+        with s.db() as con:
+            plan = con.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM items WHERE status='ready'"
+            ).fetchall()
+        self.assertIn("items_status", str([tuple(r) for r in plan]))
+
+    def test_batch_reads_receipts_once_and_leaves_missing_receipts_queued(self):
+        first = self.save()
+        second = dict(first, key="other", feed_id="other-feed")
+        with s.db() as con:
+            con.execute(
+                "INSERT INTO items(key,metadata,feed_id,relay_path,status) VALUES(?,?,?,?,?)",
+                (
+                    second["key"],
+                    second["metadata"],
+                    second["feed_id"],
+                    "other.mp4",
+                    "ready",
+                ),
+            )
+        with (
+            patch.object(s, "release_source_locks"),
+            patch.object(s, "ensure_library", return_value="1"),
+            patch.object(
+                s,
+                "rex",
+                side_effect=[
+                    {},
+                    {
+                        "items": [
+                            {"id": first["feed_id"], "ratingKey": "77"},
+                            {
+                                "id": second["feed_id"],
+                                "ratingKey": "88",
+                                "deleted": True,
+                            },
+                        ]
+                    },
+                ],
+            ) as rex,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "receipts missing"):
+                s.publish_batch([first, second])
+        self.assertEqual(rex.call_count, 2)
+        self.assertEqual(len(rex.call_args_list[0].args[2]["items"]), 2)
+        with s.db() as con:
+            statuses = dict(con.execute("SELECT key,status FROM items"))
+        self.assertEqual(statuses[first["key"]], "published")
+        self.assertEqual(statuses[second["key"]], "ready")
+
     def test_scanner_and_publisher_do_not_publish_the_same_ready_row_twice(self):
         from concurrent.futures import ThreadPoolExecutor, TimeoutError
         from threading import Event
@@ -91,7 +326,8 @@ class FeedFeatures(unittest.TestCase):
         calls = []
         self.save()
 
-        def publish(row):
+        def publish(rows):
+            row = rows[0]
             calls.append(row["key"])
             first.set()
             self.assertTrue(release.wait(2))
@@ -105,7 +341,7 @@ class FeedFeatures(unittest.TestCase):
             return s.flush_ready()
 
         with (
-            patch.object(s, "publish", side_effect=publish),
+            patch.object(s, "publish_batch", side_effect=publish),
             ThreadPoolExecutor(max_workers=2) as pool,
         ):
             one = pool.submit(s.flush_ready)

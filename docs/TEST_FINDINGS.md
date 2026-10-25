@@ -142,3 +142,110 @@ channel keys, pins and country collections were restored in place. Main retains
 an independent background publisher so long backfills do not hold ready items
 until the entire scan finishes. Failed pushes stay ready for retry, and delivery
 is serialized to prevent scanner/publisher races.
+
+## Batched feed publishing — 25 October 2026
+
+Rex currently lists all feed receipts without pagination or an item-id filter.
+Pending deliveries now use batches of up to 100 rows: one upsert followed by one
+receipt listing per batch, rather than a full listing after every video. Missing
+or deleted receipts leave rows queued; retries use the same stable feed IDs.
+This reduces publication overhead without changing channel discovery or polling.
+
+## Catalog query cost — 25 October 2026
+
+Episode numbering previously loaded and decoded every catalog row after each saved
+video. It now reads only unnumbered episodes for the affected creator and obtains
+the previous maximum through an expression index. Status and offline-source
+queries are indexed too. A metadata-only database-copy benchmark with 14,214 rows
+measured 327.92 ms CPU for the old full decode versus 0.164 ms per unchanged
+numbering call (100 calls) for the indexed implementation. This isolates numbering
+work; it is not a promise about total extraction or playback CPU.
+The offline suite passes 100 tests, including no JSON decoding for an already
+numbered channel and confirmation that the queue query uses its index.
+
+A subsequent live CPU profile identified repeated full yt-dlp channel enumeration
+as the remaining CPU consumer during partial backfills. Successful YouTube
+channel inventories are now persisted in SQLite and reused for the configured
+poll interval (minimum one hour), including across restarts. Changing max_items
+selects a different cached inventory; live targets bypass it. Initial discovery
+and scheduled full refreshes still perform yt-dlp extraction. All 101 offline
+tests pass, including cache reuse, changed limits and live bypass.
+
+Large backfills can also involve legitimate yt-dlp extraction for thousands of
+new or refresh-due videos. A configurable scanner-only average CPU budget now
+yields after extraction using measured thread CPU time; playback/publishing
+threads are unaffected. Calls can burst before the compensating pause. The
+suite now passes 102 tests, including deterministic CPU-budget accounting.
+Empty retired-version queues now return without building a catalog-wide
+subquery; active retirement checks use the feed-ID index.
+
+## Idle verification — 25 October 2026
+
+The publisher now waits on a work event instead of polling every 15 seconds;
+only failures use a five-minute retry timer. Scan deadlines persist across
+restarts, and scans with no due source, delivery or snapshot return without
+Rex HTTP calls or catalog/collection processing. Offline coverage verifies
+these idle paths and saved deadlines; all 105 tests pass.
+
+After pending delivery drained and the next scan was deliberately scheduled
+later, a 40-second live-process sample recorded 0.0% CPU, zero disk read/write
+bytes and zero read/write syscalls. Stack inspection showed both background
+threads waiting and the HTTP server in select. This verifies idle behavior;
+active scans and playback still consume resources.
+
+## Sustained scan correction — 25 October 2026
+
+The earlier idle sample measured a deliberately deferred scan, so it did not
+prove normal scans finished promptly. A running scan was found to spend hours
+refreshing existing uploads with per-source batches of 1,000. Upload metadata
+can now opt out of age-only extraction with refresh_hours: 0, while changed
+listing titles and delivery settings still request extraction. Whitespace-only
+title differences are ignored. A total scan.max_extracts quota bounds upload
+work across all channels without pruning incomplete inventories.
+
+Accepted upserts with a known stable feed identity reuse their stored receipt;
+changed feed versions clear it. SQLite connections are reused per thread,
+avoiding per-row last-connection WAL checkpoints. Schedule-only policy changes
+neither write every metadata row nor trigger publication. Explicit scan start
+and finish messages distinguish ongoing work from the idle interval.
+
+Verification after these corrections: a normal scheduled scan completed in
+45.0 seconds and scheduled its next pass for one hour later. No artificial
+scan deferral was used for that pass. In the following 40-second idle sample,
+the process used 0.025% of one core, zero disk read/write bytes and zero
+read/write syscalls, with no queued publications. All 109 offline tests pass,
+including thread-local connection reuse/rollback, no receipt listing for known
+identities, disabled age refresh, normalized title changes and the global quota.
+
+## Incremental discovery and year window — 25 October 2026
+
+YouTube channel discovery now consumes raw lazy yt-dlp entries newest-first,
+stopping at a three-ID overlap. The historical metadata queue is durable and
+separate from discovery progress; new discoveries are not subject to legacy
+extraction caps. A channel starts at January 1 of the year it is added. Exact
+video dates are checked before publication, while approximate listing dates use
+a two-month overlap before the year boundary. Weekly year reconciliation does
+not delete previously published media. Members-only/private listing entries are
+held as restricted without repeated extraction. Explicit playback layout changes
+queue a refresh rather than depending on daily archive-wide re-extraction.
+
+The offline suite passes 120 tests. New cases cover lazy early termination,
+failed discovery retaining queued work, year-boundary exclusion without pruning,
+uncapped new jobs, restricted jobs not consuming backfill quota, empty listings,
+and exact-date rejection before probing/publication. A real channel check read
+three flat entries in 0.4 seconds without materializing the channel archive.
+The initial year-window reconciliation inspected between 12 and 368 entries per
+configured channel rather than every historical upload. Queue reporting is
+available through `/api/discovery`.
+
+A real repeat incremental channel check completed in 0.385 seconds. The
+year-window scan and queued metadata pass then finished normally; the large
+pre-existing archive was not re-extracted. Date-limited cleanup was backed up
+and all explicitly removed feed IDs were verified inactive in Rex. Restricted
+items are reported separately from retryable metadata failures.
+
+Final live verification: the remaining public metadata work was drained; the
+queue had no pending jobs. Members-only/private/age-gated entries were held as
+restricted instead of retried as ordinary backfill. A subsequent 25-second idle
+sample recorded 0.0% CPU and zero disk read/write bytes; health returned HTTP
+200. Exact-date checks continued to prevent pre-boundary publication.

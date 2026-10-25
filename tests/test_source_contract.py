@@ -145,24 +145,29 @@ class SourceContractTests(unittest.TestCase):
 
     def test_network_failure_does_not_remove_live_movies(self):
         with (
-            patch.object(s, "setup_rex"),
-            patch.object(s, "flush_ready"),
-            patch.object(
-                s.config,
-                "source_entries",
-                return_value=[
-                    {
-                        "url": site_url("twitch", "live"),
-                        "options": {"name": "", "check_live": None},
-                    }
-                ],
-            ),
-            patch.object(s, "sync_source", side_effect=requests.Timeout),
-            patch.object(s, "remove_offline") as remove,
-            self.assertLogs(s.LOG, level="WARNING"),
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(s, "ROOT", Path(directory)),
         ):
-            s.sync()
-        remove.assert_not_called()
+            s.init_db()
+            with (
+                patch.object(s, "setup_rex"),
+                patch.object(s, "flush_ready"),
+                patch.object(
+                    s.config,
+                    "source_entries",
+                    return_value=[
+                        {
+                            "url": site_url("twitch", "live"),
+                            "options": {"name": "", "check_live": None},
+                        }
+                    ],
+                ),
+                patch.object(s, "sync_source", side_effect=requests.Timeout),
+                patch.object(s, "remove_offline") as remove,
+                self.assertLogs(s.LOG, level="WARNING"),
+            ):
+                s.sync()
+            remove.assert_not_called()
 
     def test_offline_confirmation_removes_only_that_sources_live_movie(self):
         with (

@@ -127,7 +127,7 @@ def options(values, label):
     for field in ("year_seasons", "check_live"):
         boolean(values[field], label + "." + field)
     for field, low, high in [
-        ("refresh_hours", 1, 8760),
+        ("refresh_hours", 0, 8760),
         ("season", 0, 9999),
         ("max_items", 0, 100000),
         ("interval_seconds", 0, 86400),
@@ -154,7 +154,15 @@ def normalize(document):
     scan = mapping(
         document.get("scan"),
         "scan",
-        {"interval_seconds", "batch_size", "max_items", "snapshot_hours"},
+        {
+            "interval_seconds",
+            "batch_size",
+            "max_items",
+            "snapshot_hours",
+            "cpu_percent",
+            "max_extracts",
+            "backfill_batch_size",
+        },
     )
     playback = mapping(
         document.get("playback"), "playback", {"max_height", "live_buffer_mb"}
@@ -182,6 +190,15 @@ def normalize(document):
         ),
         "snapshot_hours": integer(
             scan.get("snapshot_hours", 6), "scan.snapshot_hours", 1, 8760
+        ),
+        "backfill_batch_size": integer(
+            scan.get("backfill_batch_size", 25), "scan.backfill_batch_size", 1, 10000
+        ),
+        "max_extracts": integer(
+            scan.get("max_extracts", 0), "scan.max_extracts", 0, 100000
+        ),
+        "scan_cpu_percent": integer(
+            scan.get("cpu_percent", 20), "scan.cpu_percent", 1, 100
         ),
         "batch_size": integer(scan.get("batch_size", 5), "scan.batch_size", 1, 1000),
         "collection_limit": integer(

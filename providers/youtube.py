@@ -18,7 +18,9 @@ NAME = "YouTube"
 
 def collection_url(url):
     """Select the uploads collection for channel roots; individual and live URLs stay unchanged."""
-    if "/@" in url and not re.search(r"/(videos|streams|shorts|live)/?$", url):
+    if ("/@" in url or re.search(r"/channel/[^/]+/?$", url)) and not re.search(
+        r"/(videos|streams|shorts|live)/?$", url
+    ):
         return url.rstrip("/") + "/videos"
     return url
 

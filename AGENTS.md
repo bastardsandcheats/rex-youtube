@@ -126,3 +126,17 @@ On the maintainer's host, the service unit is `rex-youtube`; Rex is maintained s
 Use feed `display` for source metadata; do not lock source titles through the library edit API. `probe` is true (whole bounded ffprobe response), false (no indexing probe), or headers (prior lightweight default). Refresh metadata in bounded batches (`refresh_hours`, default 24). Complete cached snapshots run every six hours (`scan.snapshot_hours`) only after successful scans/delivery. Do not force shrink guards. Changed delivery selection gets a new feed ID and file label; refresh requests pin format IDs/layout.
 
 Collections are independent of show/movie presentation: `collection: NAME|true|false`, `type: collection`, `collection_type: movie|show`, and `live_collection: NAME|true|false` (true by default). Follow `app/collections.py` ownership/GUID checks and PlexControl's verified member APIs. Do not modify another app's collections. The current focused suite has 95 passing tests. New API integration and one full-probed YouTube playback were verified on Rex `9671faa2dda20abff12a37885ab2dc0b4bcffccb`; older playback evidence above remains historical.
+
+## Incremental YouTube discovery (25 October 2026)
+
+`app/discovery.py` separates durable discovered IDs from metadata jobs. YouTube
+channel polls use `source.iter_youtube_uploads`, raw lazy newest-first entries,
+three known IDs of overlap, and a persisted Jan-1 boundary from the year added.
+Exact dates gate publication; weekly year-window reconciliation never treats
+unseen older media as deletions. Existing older items are retained unless the
+user explicitly asks to remove them. New jobs are uncapped by legacy extraction
+limits; historical metadata uses `scan.backfill_batch_size`. Restricted uploads
+are tracked without busy retries. `/api/discovery` reports counts. Playback
+layout changes explicitly queue refresh and wake the scanner. Connections are
+thread-local; publication is event-driven; idle scans must not do collection or
+HTTP work. Test paging with a generator that fails if an extra page is read.
