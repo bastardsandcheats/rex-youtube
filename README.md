@@ -36,7 +36,16 @@ Logs default to INFO and rotate automatically. `/health` reports availability. P
 
 ## Collections and optional probing
 
-Keep a channel as a show and set `collection: Level1Techs` on several related channels to group their shows. Or use `type: collection` to expose a channel's uploads as individual movies in a channel-named collection. `collection_type: show` is also supported. Collections are scoped to a library/type, as in PlexControl. Live streams are grouped into site-named collections by default; set `live_collection: false` or give it a custom name.
+Keep a channel as a show and set `collection: Level1Techs` on several related channels to group their shows. Or use `type: collection` to expose a channel's uploads as individual movies in a channel-named collection. `collection_type: show` is also supported. Collections are sent through Rex’s native feed `collections` field, scoped to a library/type. This requires Rex with native feed collection support (upstream `7e064697` or newer). Live streams are grouped into site-named collections by default; set `live_collection: false` or give it a custom name.
+
+**How the feed works:** each item includes `"collections": ["Level1Techs"]`.
+Rex creates/finds that collection within the item’s library and adds the movie
+or the episode’s parent show. All episodes send their show’s complete name
+list. Disabling grouping sends `"collections": []`; omitting the field would
+leave memberships unchanged. Upserts and snapshots use the same payload.
+[Collection feed examples and upgrade behavior](docs/COLLECTIONS.md) explain
+ownership, multiple memberships and the migration from static collection APIs.
+
 
 Each site/source can set `probe: true` for complete ffprobe metadata, `probe: false` to use extractor metadata without probing, or `probe: headers` (the existing lightweight default). Accurate stream information still matters: disabling probing trades verification for less network work. No media cache is created.
 

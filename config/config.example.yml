@@ -29,6 +29,7 @@ defaults:                        # Inherited by sites, then by their source entr
   probe: headers                 # true: full ffprobe JSON from the relay; false: no probe.
                                  # headers: existing lightweight muxed-HLS track check.
   refresh_hours: 24              # Use 0 to skip age-only refresh of existing uploads.
+  # Collection names use native Rex feed collections (Rex 7e064697 or newer).
   collection: false              # true: channel-named collection; or supply a shared name.
   collection_type: movie         # With type: collection, uploads become movies (or show).
   live_collection: true          # Group the Live Streams library by site; or set a name/false.

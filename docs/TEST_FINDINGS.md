@@ -249,3 +249,19 @@ queue had no pending jobs. Members-only/private/age-gated entries were held as
 restricted instead of retried as ordinary backfill. A subsequent 25-second idle
 sample recorded 0.0% CPU and zero disk read/write bytes; health returned HTTP
 200. Exact-date checks continued to prevent pre-boundary publication.
+
+## Native feed collections — 25 October 2026
+
+The addon now sends `collections` on incremental upserts and complete snapshots,
+using an explicit empty array when disabled. Episodes of one show send the
+complete union of cached collection names. The old static collection mutation
+loop has been removed. Its GUID ledger is retained and checked read-only before
+the one-time cached metadata republication.
+
+Validation: 123 offline tests passed, including named/empty payloads, episode
+union, GUID mismatch protection and idempotent migration without changing media
+IDs or cached metadata. Black, Ruff and `git diff --check` passed. A running
+instance restarted successfully against current Rex and confirmed successive
+100-item publication batches after migration. This was not a new playback or
+client compatibility test; earlier playback results above retain their original
+scope. See [the feed examples](COLLECTIONS.md).

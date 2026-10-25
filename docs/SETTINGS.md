@@ -124,7 +124,10 @@ Set `sites.youtube.probe: false`, for example, to avoid probing that site's inde
 
 ## Rex collections
 
-Collections group existing shows or movies without changing what they are. Like PlexControl, this addon creates a separate collection per library and member type; a movie and a TV library cannot share one cross-library collection.
+See [the native collection feed contract](COLLECTIONS.md) for JSON payloads,
+episode grouping, clearing memberships and upgrade behavior.
+
+Collections group existing shows or movies without changing what they are. The addon sends collection names in each feed item’s native `collections` array, scoped to library and member type; a movie and a TV library cannot share one cross-library collection.
 
 ```yaml
 sites:
@@ -150,7 +153,9 @@ Merge this example into the existing `sites` mapping; do not configure one URL t
 
 `collection` accepts a name, `true` (use the channel name) or `false` (no collection). `type: collection` implies a channel-named collection when no name is given; `collection_type` chooses `movie` (default) or `show`. A plain `type: show` or `type: movie` can independently set `collection` too. `live_collection` has the same name/boolean options, defaults to true, and groups live items by site in their live library. All these options can be set in defaults, at site level or per source.
 
-After a partial scan, reconciliation can add known collection members but does not remove memberships or collections. Only collections created and recorded by this addon are reconciled. A stored GUID must match before editing or deletion. Disabling a group removes its managed collection, never its media or somebody else's collection.
+Requires Rex with native feed collections (upstream `7e064697` or newer). Every upsert and snapshot includes `collections`: named membership, or an explicit empty array when disabled. Rex manages source-owned memberships and preserves unrelated memberships. Episodes send the full union of their show’s configured collection names, so the last episode cannot discard another episode’s group. Failed scans retain cached inventory.
+
+On upgrade, existing cached items are queued once for republication without extraction or probing. The old collection GUID ledger is checked before migration and retained for rollback; the addon no longer creates, edits or deletes collections through the static membership API. A GUID mismatch stops publication rather than changing an unrecognized collection. Disabling a group clears source-owned membership; an empty collection may remain in Rex. Existing media IDs and episode numbers stay the same.
 
 ### Incremental YouTube discovery
 

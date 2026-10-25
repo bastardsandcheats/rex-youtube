@@ -50,6 +50,42 @@ class FeedFeatures(unittest.TestCase):
         self.assertEqual(payload["display"]["date"], "2026-01-02")
         self.assertNotIn("locked", json.dumps(payload))
 
+    def test_native_feed_collections_include_explicit_empty_list(self):
+        row = self.save(options={"type": "movie", "collection": "Lessons"})
+        with patch.object(s, "ensure_library", return_value="1"):
+            self.assertEqual(s.feed_item(row)["collections"], ["Lessons"])
+            row = self.save(options={"type": "movie", "collection": False})
+            self.assertEqual(s.feed_item(row)["collections"], [])
+
+    def test_every_episode_sends_the_complete_show_collection_union(self):
+        first = self.save(options={"type": "show", "collection": "Learning"})
+        video = copy.deepcopy(self.video)
+        video["id"] = "another-upload"
+        video["webpage_url"] = "https://videos.example/another-upload"
+        second = self.save(video, {"type": "show", "collection": "Technology"})
+        with patch.object(s, "ensure_library", return_value="1"):
+            for row in (first, second):
+                self.assertEqual(
+                    s.feed_item(row)["collections"], ["Learning", "Technology"]
+                )
+
+    def test_native_migration_requeues_published_metadata_only_once(self):
+        row = self.save()
+        with s.db() as con:
+            con.execute(
+                "UPDATE items SET status='published' WHERE key=?", (row["key"],)
+            )
+            con.execute("DELETE FROM state WHERE key='native_collections_queued_v1'")
+        s.init_db()
+        migrated = s.catalog_rows()[0]
+        self.assertEqual(migrated["status"], "ready")
+        self.assertEqual(migrated["feed_id"], row["feed_id"])
+        self.assertEqual(migrated["metadata"], row["metadata"])
+        with s.db() as con:
+            con.execute("UPDATE items SET status='published'")
+        s.init_db()
+        self.assertEqual(s.catalog_rows()[0]["status"], "published")
+
     def test_live_window_duration_is_not_declared_as_broadcast_length(self):
         video = copy.deepcopy(self.video)
         video.update(is_live=True, live_status="is_live", duration=3600)
@@ -518,7 +554,7 @@ class FeedFeatures(unittest.TestCase):
             self.fail("Modified a collection after ownership changed: " + path)
 
         with self.assertRaisesRegex(ValueError, "GUID"):
-            groups.reconcile([row], request, s.db)
+            groups.verify_legacy(request, s.db)
 
     def test_full_probe_correction_versions_an_existing_inferred_layout(self):
         old = self.save()

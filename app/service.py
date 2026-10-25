@@ -214,6 +214,12 @@ def init_db():
             json_extract(metadata,'$.source_entry'), json_extract(metadata,'$.is_live'));
         """)
         discovery.init_db(con)
+        if not con.execute(
+            "SELECT 1 FROM state WHERE key='native_collections_queued_v1'"
+        ).fetchone():
+            # Republish cached metadata once, without extracting/probing media again.
+            con.execute("UPDATE items SET status='ready' WHERE status='published'")
+            con.execute("INSERT INTO state VALUES('native_collections_queued_v1','1')")
         # Additive ownership bookkeeping keeps existing YAML/catalogs usable.
         con.execute(
             "INSERT OR IGNORE INTO item_sources SELECT json_extract(metadata,'$.source_entry'),key FROM items WHERE json_extract(metadata,'$.source_entry') IS NOT NULL"
@@ -478,7 +484,7 @@ def reorder(creator_id):
                 )
 
 
-def feed_item(row):
+def feed_item(row, memberships=None):
     """Source display is metadata, not a locked user edit: Rex respects the user's changes."""
     item = json.loads(row["metadata"])
     display = {"title": item["title"]}
@@ -501,7 +507,14 @@ def feed_item(row):
     file = "/rex-youtube/" + row["relay_path"]
     if item["delivery"] == "dash":
         file = file.rsplit(".", 1)[0] + ".mp4"
+    if memberships is None:
+        memberships = rex_collections.memberships(catalog_rows(), library_name)
+    names = memberships.get(
+        rex_collections.identity(item, library_name(item)),
+        [item["collection"]] if item.get("collection") else [],
+    )
     payload = {
+        "collections": names,
         "id": row["feed_id"],
         "path": row["relay_path"],
         "file": file,
@@ -596,18 +609,26 @@ def publish(row):
     publish_batch([row])
 
 
+def verify_collection_migration():
+    if not state("native_collections_verified_v1"):
+        rex_collections.verify_legacy(rex, db)
+        state("native_collections_verified_v1", "1")
+
+
 def publish_batch(rows):
     """One upsert and receipt listing per bounded batch, not per video.
 
     Only confirmed, active receipts complete local work. A failed or partial
     response leaves unconfirmed rows queued for an idempotent retry.
     """
+    verify_collection_migration()
+    memberships = rex_collections.memberships(catalog_rows(), library_name)
     for row in rows:
         release_source_locks(row, json.loads(row["metadata"]))
     response = rex(
         "POST",
         "/rex/feed/" + CFG["source"] + "/items",
-        {"items": [feed_item(row) for row in rows]},
+        {"items": [feed_item(row, memberships) for row in rows]},
     )
     if response.get("rejected") or response.get("held"):
         raise RuntimeError("Rex refused media metadata in the publication batch")
@@ -943,7 +964,9 @@ def snapshot():
     rows = catalog_rows()
     if any(row["status"] != "published" for row in rows):
         return False
-    items = [feed_item(row) for row in rows]
+    verify_collection_migration()
+    memberships = rex_collections.memberships(rows, library_name)
+    items = [feed_item(row, memberships) for row in rows]
     for attempt in range(2):
         session = str(time.time_ns())
         chunks = [items[n : n + 200] for n in range(0, len(items), 200)] or [[]]
@@ -1043,11 +1066,6 @@ def sync():
     if complete:
         reconcile_sources(active)
     complete = flush_ready() and complete
-    # Partial rounds may add known memberships, never remove them.
-    try:
-        rex_collections.reconcile(catalog_rows(), rex, db, prune=complete)
-    except Exception as error:
-        LOG.warning("Collection reconciliation failed: %s", type(error).__name__)
     if complete:
         if (
             time.time() - float(state("last_snapshot") or 0)
